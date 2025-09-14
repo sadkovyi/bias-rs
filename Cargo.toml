@@ -1,0 +1,23 @@
+[workspace]
+members = [
+    "crates/bias-rs",
+    "crates/bias-cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/sadkovyi/bias-rs.git"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+[workspace.lints.rust]
+rust_2018_idioms = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
