@@ -12,6 +12,10 @@ name = "bias_rs"
 path = "src/lib.rs"
 
 [dependencies]
+arrow-array = "56.2.0"
+arrow-schema = "56.2.0"
+serde = { version = "1.0.228", features = ["derive"] }
+thiserror = "2.0.17"
 
 [lints]
 workspace = true
