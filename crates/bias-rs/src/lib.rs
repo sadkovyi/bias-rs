@@ -5,6 +5,7 @@ mod config;
 mod dataset;
 mod error;
 mod report;
+mod stats;
 
 pub use audit::audit_dataset;
 pub use config::{
