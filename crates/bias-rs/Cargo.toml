@@ -14,9 +14,13 @@ path = "src/lib.rs"
 [dependencies]
 arrow-array = "56.2.0"
 arrow-schema = "56.2.0"
+csv = "1.4.0"
 serde = { version = "1.0.228", features = ["derive"] }
 statrs = "0.18.0"
 thiserror = "2.0.17"
+
+[dev-dependencies]
+tempfile = "3.23.0"
 
 [lints]
 workspace = true

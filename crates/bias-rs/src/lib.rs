@@ -4,6 +4,7 @@ mod audit;
 mod config;
 mod dataset;
 mod error;
+pub mod io;
 mod report;
 mod stats;
 
@@ -15,6 +16,7 @@ pub use config::{
 };
 pub use dataset::Dataset;
 pub use error::BiasError;
+pub use io::csv::{CsvReadOptions, read_csv};
 pub use report::{
     AuditReport, ColumnProfile, DatasetSummary, DetectorRun, Finding, GroupSummary, Severity,
     SkippedAnalysis,

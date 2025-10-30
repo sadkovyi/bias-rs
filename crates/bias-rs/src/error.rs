@@ -11,6 +11,8 @@ pub enum BiasError {
     UnsupportedColumnType { column: String, data_type: String },
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("csv error: {0}")]
+    Csv(String),
     #[error("{0}")]
     Message(String),
 }
