@@ -7,6 +7,7 @@ mod error;
 pub mod io;
 mod report;
 mod stats;
+mod table;
 
 pub use audit::audit_dataset;
 pub use config::{
