@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
-use crate::config::{DetectorConfig, DetectorKind, RepresentationConfig};
+use crate::config::{DetectorConfig, DetectorKind, MissingnessConfig, RepresentationConfig};
 use crate::report::{AuditReportConfig, DetectorRun, GroupSummary};
-use crate::stats::{goodness_of_fit, normalized_entropy};
-use crate::table::{GroupingSpec, build_group_keys, grouping_specs};
+use crate::stats::{chi_square_test, cramers_v, fisher_exact_2x2, goodness_of_fit, normalized_entropy};
+use crate::table::{GroupingSpec, analysis_columns, build_group_keys, collect_null_flags, grouping_specs};
 use crate::{AuditConfig, AuditReport, BiasError, ColumnProfile, Dataset, DatasetSummary, Finding};
 use crate::{Severity, SkippedAnalysis};
 
@@ -50,6 +50,11 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
             _ => None,
         })
         .unwrap_or_default();
+    let missingness_config = config.detectors.iter().find_map(|detector| match detector {
+        DetectorConfig::Missingness(settings) => Some(settings.clone()),
+        _ => None,
+    });
+    let analysis_columns = analysis_columns(dataset, config)?;
 
     let mut detector_runs = Vec::new();
     let mut group_summaries = Vec::new();
@@ -90,6 +95,33 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                 })
                 .count(),
         });
+
+        if let Some(settings) = &missingness_config {
+            let mut missingness_findings = missingness_findings(
+                dataset,
+                grouping,
+                &group_keys,
+                &counts,
+                &analysis_columns,
+                settings,
+                config.alpha,
+                config.min_group_size,
+                &mut skipped,
+            )?;
+            findings.append(&mut missingness_findings);
+            detector_runs.push(DetectorRun {
+                detector: DetectorKind::Missingness,
+                grouping: grouping.label.clone(),
+                analyzed_columns: analysis_columns.len(),
+                finding_count: findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.detector == DetectorKind::Missingness
+                            && finding.grouping == grouping.label
+                    })
+                    .count(),
+            });
+        }
     }
 
     findings.sort_by(|left, right| {
@@ -126,6 +158,140 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
         skipped,
         findings,
     })
+}
+
+fn missingness_findings(
+    dataset: &Dataset,
+    grouping: &GroupingSpec,
+    group_keys: &[String],
+    group_counts: &BTreeMap<String, usize>,
+    analysis_columns: &[String],
+    config: &MissingnessConfig,
+    alpha: f64,
+    min_group_size: usize,
+    skipped: &mut Vec<SkippedAnalysis>,
+) -> Result<Vec<Finding>, BiasError> {
+    if group_counts.len() < 2 {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::Missingness,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: "missingness analysis needs at least two groups".to_string(),
+        });
+        return Ok(Vec::new());
+    }
+
+    if group_counts.values().any(|count| *count < min_group_size) {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::Missingness,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: format!("at least one group is smaller than {min_group_size} rows"),
+        });
+        return Ok(Vec::new());
+    }
+
+    let group_order = group_counts.keys().cloned().collect::<Vec<_>>();
+    let group_index = group_order
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (group.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut findings = Vec::new();
+    for column in analysis_columns {
+        let null_flags = collect_null_flags(dataset, column)?;
+        let mut table = vec![vec![0_u64, 0_u64]; group_order.len()];
+        for (group_key, is_missing) in group_keys.iter().zip(null_flags.iter()) {
+            let row = group_index[group_key];
+            if *is_missing {
+                table[row][0] += 1;
+            } else {
+                table[row][1] += 1;
+            }
+        }
+
+        let missing_rates = group_order
+            .iter()
+            .enumerate()
+            .map(|(index, group)| {
+                let total = table[index][0] + table[index][1];
+                let rate = if total == 0 {
+                    0.0
+                } else {
+                    table[index][0] as f64 / total as f64
+                };
+                (group.clone(), rate)
+            })
+            .collect::<Vec<_>>();
+        let max_missing_rate = missing_rates
+            .iter()
+            .map(|(_, rate)| *rate)
+            .fold(0.0_f64, f64::max);
+        let min_missing_rate = missing_rates
+            .iter()
+            .map(|(_, rate)| *rate)
+            .fold(1.0_f64, f64::min);
+        let rate_gap = max_missing_rate - min_missing_rate;
+
+        let chi_square = chi_square_test(&table);
+        let fisher_p_value = if table.len() == 2
+            && table.iter().flat_map(|row| row.iter()).any(|value| *value < config.sparse_table_threshold as u64)
+        {
+            fisher_exact_2x2([[table[0][0], table[0][1]], [table[1][0], table[1][1]]])
+        } else {
+            None
+        };
+
+        let (p_value, effect_size, min_expected_count) = if let Some(p_value) = fisher_p_value {
+            (Some(p_value), Some(rate_gap), None)
+        } else if let Some(result) = chi_square {
+            (
+                Some(result.p_value),
+                cramers_v(&table, result.statistic),
+                Some(result.min_expected_count),
+            )
+        } else {
+            skipped.push(SkippedAnalysis {
+                detector: DetectorKind::Missingness,
+                grouping: grouping.label.clone(),
+                target_column: Some(column.clone()),
+                reason: "missingness contingency table could not be evaluated".to_string(),
+            });
+            continue;
+        };
+
+        if let Some(p_value) = p_value {
+            if p_value <= alpha {
+                findings.push(Finding {
+                    detector: DetectorKind::Missingness,
+                    grouping: grouping.label.clone(),
+                    sensitive_columns: grouping.columns.clone(),
+                    target_column: Some(column.clone()),
+                    group: None,
+                    severity: if rate_gap >= 0.25 {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
+                    message: format!("missing values for `{column}` vary across sensitive groups"),
+                    p_value: Some(p_value),
+                    corrected_p_value: None,
+                    effect_size,
+                    metrics: BTreeMap::from([
+                        ("max_missing_rate".to_string(), max_missing_rate),
+                        ("min_missing_rate".to_string(), min_missing_rate),
+                        ("missing_rate_gap".to_string(), rate_gap),
+                        (
+                            "min_expected_count".to_string(),
+                            min_expected_count.unwrap_or(0.0),
+                        ),
+                    ]),
+                });
+            }
+        }
+    }
+
+    Ok(findings)
 }
 
 fn count_groups(group_keys: &[String]) -> BTreeMap<String, usize> {
@@ -303,6 +469,7 @@ mod tests {
 
     use crate::config::{AuditConfig, GroupingMode, ReferenceDistribution};
     use crate::io::csv::{CsvReadOptions, read_csv};
+    use crate::DetectorKind;
 
     use super::audit_dataset;
 
@@ -375,5 +542,27 @@ mod tests {
             .detector_runs
             .iter()
             .any(|run| run.grouping == "gender+race"));
+    }
+
+    #[test]
+    fn missingness_audit_flags_group_differences() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        writeln!(
+            file,
+            "gender,score\nwoman,\nwoman,\nwoman,\nwoman,\nwoman,\nwoman,\nwoman,\nwoman,1.0\nman,2.0\nman,2.0\nman,3.0\nman,3.0\nman,4.0\nman,4.0\nman,5.0\nman,5.0"
+        )
+        .expect("write csv");
+
+        let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
+        let config = AuditConfig::builder()
+            .sensitive_column("gender")
+            .min_group_size(2)
+            .build();
+
+        let report = audit_dataset(&dataset, &config).expect("audit report");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.detector == DetectorKind::Missingness));
     }
 }

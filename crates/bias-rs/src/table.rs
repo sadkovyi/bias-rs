@@ -133,6 +133,46 @@ pub(crate) fn collect_numeric_column(
     Ok(values)
 }
 
+pub(crate) fn collect_null_flags(
+    dataset: &Dataset,
+    column_name: &str,
+) -> Result<Vec<bool>, BiasError> {
+    let column_index = dataset
+        .schema()
+        .index_of(column_name)
+        .map_err(|_| BiasError::MissingColumn(column_name.to_string()))?;
+    let mut flags = Vec::with_capacity(dataset.row_count());
+    for batch in dataset.batches() {
+        let array = batch.column(column_index);
+        for index in 0..array.len() {
+            flags.push(array.is_null(index));
+        }
+    }
+    Ok(flags)
+}
+
+pub(crate) fn analysis_columns(
+    dataset: &Dataset,
+    config: &AuditConfig,
+) -> Result<Vec<String>, BiasError> {
+    let mut columns = match &config.analysis_columns {
+        crate::ColumnSelection::All => dataset
+            .column_names()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>(),
+        crate::ColumnSelection::Named(columns) => columns.clone(),
+    };
+    for column in &columns {
+        if !dataset.has_column(column) {
+            return Err(BiasError::MissingColumn(column.clone()));
+        }
+    }
+
+    columns.retain(|column| !config.sensitive_columns.iter().any(|sensitive| sensitive == column));
+    Ok(columns)
+}
+
 pub(crate) fn is_numeric_type(data_type: &DataType) -> bool {
     matches!(
         data_type,
