@@ -1,9 +1,15 @@
 use std::collections::BTreeMap;
 
-use crate::config::{DetectorConfig, DetectorKind, MissingnessConfig, RepresentationConfig};
+use crate::config::{
+    CategoricalAssociationConfig, DetectorConfig, DetectorKind, MissingnessConfig,
+    RepresentationConfig,
+};
 use crate::report::{AuditReportConfig, DetectorRun, GroupSummary};
 use crate::stats::{chi_square_test, cramers_v, fisher_exact_2x2, goodness_of_fit, normalized_entropy};
-use crate::table::{GroupingSpec, analysis_columns, build_group_keys, collect_null_flags, grouping_specs};
+use crate::table::{
+    GroupingSpec, analysis_columns, build_group_keys, collect_null_flags,
+    collect_stringish_column, grouping_specs, is_numeric_type,
+};
 use crate::{AuditConfig, AuditReport, BiasError, ColumnProfile, Dataset, DatasetSummary, Finding};
 use crate::{Severity, SkippedAnalysis};
 
@@ -52,6 +58,10 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
         .unwrap_or_default();
     let missingness_config = config.detectors.iter().find_map(|detector| match detector {
         DetectorConfig::Missingness(settings) => Some(settings.clone()),
+        _ => None,
+    });
+    let categorical_config = config.detectors.iter().find_map(|detector| match detector {
+        DetectorConfig::CategoricalAssociation(settings) => Some(settings.clone()),
         _ => None,
     });
     let analysis_columns = analysis_columns(dataset, config)?;
@@ -117,6 +127,32 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                     .iter()
                     .filter(|finding| {
                         finding.detector == DetectorKind::Missingness
+                            && finding.grouping == grouping.label
+                    })
+                    .count(),
+            });
+        }
+
+        if let Some(settings) = &categorical_config {
+            let mut categorical_findings = categorical_association_findings(
+                dataset,
+                grouping,
+                &group_keys,
+                &analysis_columns,
+                settings,
+                config.alpha,
+                config.min_group_size,
+                &mut skipped,
+            )?;
+            findings.append(&mut categorical_findings);
+            detector_runs.push(DetectorRun {
+                detector: DetectorKind::CategoricalAssociation,
+                grouping: grouping.label.clone(),
+                analyzed_columns: analysis_columns.len(),
+                finding_count: findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.detector == DetectorKind::CategoricalAssociation
                             && finding.grouping == grouping.label
                     })
                     .count(),
@@ -292,6 +328,164 @@ fn missingness_findings(
     }
 
     Ok(findings)
+}
+
+fn categorical_association_findings(
+    dataset: &Dataset,
+    grouping: &GroupingSpec,
+    group_keys: &[String],
+    analysis_columns: &[String],
+    config: &CategoricalAssociationConfig,
+    alpha: f64,
+    min_group_size: usize,
+    skipped: &mut Vec<SkippedAnalysis>,
+) -> Result<Vec<Finding>, BiasError> {
+    let group_counts = count_groups(group_keys);
+    if group_counts.len() < 2 {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::CategoricalAssociation,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: "categorical association needs at least two groups".to_string(),
+        });
+        return Ok(Vec::new());
+    }
+
+    if group_counts.values().any(|count| *count < min_group_size) {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::CategoricalAssociation,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: format!("at least one group is smaller than {min_group_size} rows"),
+        });
+        return Ok(Vec::new());
+    }
+
+    let group_order = group_counts.keys().cloned().collect::<Vec<_>>();
+    let group_index = group_order
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (group.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut findings = Vec::new();
+
+    for column in analysis_columns {
+        let data_type = dataset
+            .column_type(column)
+            .ok_or_else(|| BiasError::MissingColumn(column.clone()))?;
+        if is_numeric_type(data_type) {
+            continue;
+        }
+
+        let values = collect_stringish_column(dataset, column)?;
+        let categories = collapse_categories(values, config);
+        let category_order = categories
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if category_order.len() < 2 {
+            continue;
+        }
+
+        let category_index = category_order
+            .iter()
+            .enumerate()
+            .map(|(index, category)| (category.clone(), index))
+            .collect::<BTreeMap<_, _>>();
+        let mut table = vec![vec![0_u64; category_order.len()]; group_order.len()];
+        for ((group_key, category), _) in group_keys.iter().zip(categories.iter()).zip(0..) {
+            let row = group_index[group_key];
+            let column_index = category_index[category];
+            table[row][column_index] += 1;
+        }
+
+        let Some(chi_square) = chi_square_test(&table) else {
+            skipped.push(SkippedAnalysis {
+                detector: DetectorKind::CategoricalAssociation,
+                grouping: grouping.label.clone(),
+                target_column: Some(column.clone()),
+                reason: "categorical contingency table could not be evaluated".to_string(),
+            });
+            continue;
+        };
+
+        if chi_square.p_value <= alpha {
+            findings.push(Finding {
+                detector: DetectorKind::CategoricalAssociation,
+                grouping: grouping.label.clone(),
+                sensitive_columns: grouping.columns.clone(),
+                target_column: Some(column.clone()),
+                group: None,
+                severity: if cramers_v(&table, chi_square.statistic).unwrap_or(0.0) >= 0.3 {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                message: format!(
+                    "categorical values for `{column}` are distributed differently across sensitive groups"
+                ),
+                p_value: Some(chi_square.p_value),
+                corrected_p_value: None,
+                effect_size: cramers_v(&table, chi_square.statistic),
+                metrics: BTreeMap::from([
+                    ("chi_square".to_string(), chi_square.statistic),
+                    (
+                        "degrees_of_freedom".to_string(),
+                        chi_square.degrees_of_freedom as f64,
+                    ),
+                    (
+                        "min_expected_count".to_string(),
+                        chi_square.min_expected_count,
+                    ),
+                    ("category_count".to_string(), category_order.len() as f64),
+                ]),
+            });
+        }
+    }
+
+    Ok(findings)
+}
+
+fn collapse_categories(
+    values: Vec<Option<String>>,
+    config: &CategoricalAssociationConfig,
+) -> Vec<String> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    let normalized = values
+        .into_iter()
+        .map(|value| value.unwrap_or_else(|| "<missing>".to_string()))
+        .collect::<Vec<_>>();
+    for value in &normalized {
+        *counts.entry(value.clone()).or_insert(0) += 1;
+    }
+
+    let mut retained = counts
+        .iter()
+        .filter_map(|(category, count)| {
+            (*count >= config.rare_category_threshold).then_some((category.clone(), *count))
+        })
+        .collect::<Vec<_>>();
+    retained.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if retained.len() >= config.max_categories {
+        retained.truncate(config.max_categories.saturating_sub(1));
+    }
+    let retained = retained
+        .into_iter()
+        .map(|(category, _)| category)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    normalized
+        .into_iter()
+        .map(|value| {
+            if retained.contains(&value) {
+                value
+            } else {
+                "__OTHER__".to_string()
+            }
+        })
+        .collect()
 }
 
 fn count_groups(group_keys: &[String]) -> BTreeMap<String, usize> {
@@ -564,5 +758,27 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.detector == DetectorKind::Missingness));
+    }
+
+    #[test]
+    fn categorical_audit_flags_distribution_shift() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        writeln!(
+            file,
+            "gender,region\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,north\nwoman,south\nwoman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,south\nman,north\nman,north"
+        )
+        .expect("write csv");
+
+        let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
+        let config = AuditConfig::builder()
+            .sensitive_column("gender")
+            .min_group_size(2)
+            .build();
+
+        let report = audit_dataset(&dataset, &config).expect("audit report");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.detector == DetectorKind::CategoricalAssociation));
     }
 }
