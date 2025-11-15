@@ -2,12 +2,15 @@ use std::collections::BTreeMap;
 
 use crate::config::{
     CategoricalAssociationConfig, DetectorConfig, DetectorKind, MissingnessConfig,
-    RepresentationConfig,
+    NumericDistributionConfig, RepresentationConfig,
 };
 use crate::report::{AuditReportConfig, DetectorRun, GroupSummary};
-use crate::stats::{chi_square_test, cramers_v, fisher_exact_2x2, goodness_of_fit, normalized_entropy};
+use crate::stats::{
+    chi_square_test, cliffs_delta, cramers_v, fisher_exact_2x2, goodness_of_fit, kruskal_wallis,
+    mann_whitney_u, normalized_entropy,
+};
 use crate::table::{
-    GroupingSpec, analysis_columns, build_group_keys, collect_null_flags,
+    GroupingSpec, analysis_columns, build_group_keys, collect_null_flags, collect_numeric_column,
     collect_stringish_column, grouping_specs, is_numeric_type,
 };
 use crate::{AuditConfig, AuditReport, BiasError, ColumnProfile, Dataset, DatasetSummary, Finding};
@@ -62,6 +65,10 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
     });
     let categorical_config = config.detectors.iter().find_map(|detector| match detector {
         DetectorConfig::CategoricalAssociation(settings) => Some(settings.clone()),
+        _ => None,
+    });
+    let numeric_config = config.detectors.iter().find_map(|detector| match detector {
+        DetectorConfig::NumericDistribution(settings) => Some(settings.clone()),
         _ => None,
     });
     let analysis_columns = analysis_columns(dataset, config)?;
@@ -153,6 +160,32 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                     .iter()
                     .filter(|finding| {
                         finding.detector == DetectorKind::CategoricalAssociation
+                            && finding.grouping == grouping.label
+                    })
+                    .count(),
+            });
+        }
+
+        if let Some(settings) = &numeric_config {
+            let mut numeric_findings = numeric_distribution_findings(
+                dataset,
+                grouping,
+                &group_keys,
+                &analysis_columns,
+                settings,
+                config.alpha,
+                config.min_group_size,
+                &mut skipped,
+            )?;
+            findings.append(&mut numeric_findings);
+            detector_runs.push(DetectorRun {
+                detector: DetectorKind::NumericDistribution,
+                grouping: grouping.label.clone(),
+                analyzed_columns: analysis_columns.len(),
+                finding_count: findings
+                    .iter()
+                    .filter(|finding| {
+                        finding.detector == DetectorKind::NumericDistribution
                             && finding.grouping == grouping.label
                     })
                     .count(),
@@ -488,6 +521,189 @@ fn collapse_categories(
         .collect()
 }
 
+fn numeric_distribution_findings(
+    dataset: &Dataset,
+    grouping: &GroupingSpec,
+    group_keys: &[String],
+    analysis_columns: &[String],
+    config: &NumericDistributionConfig,
+    alpha: f64,
+    min_group_size: usize,
+    skipped: &mut Vec<SkippedAnalysis>,
+) -> Result<Vec<Finding>, BiasError> {
+    let group_counts = count_groups(group_keys);
+    if group_counts.len() < 2 {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::NumericDistribution,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: "numeric distribution needs at least two groups".to_string(),
+        });
+        return Ok(Vec::new());
+    }
+
+    if group_counts.values().any(|count| *count < min_group_size) {
+        skipped.push(SkippedAnalysis {
+            detector: DetectorKind::NumericDistribution,
+            grouping: grouping.label.clone(),
+            target_column: None,
+            reason: format!("at least one group is smaller than {min_group_size} rows"),
+        });
+        return Ok(Vec::new());
+    }
+
+    let group_order = group_counts.keys().cloned().collect::<Vec<_>>();
+    let group_index = group_order
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (group.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut findings = Vec::new();
+
+    for column in analysis_columns {
+        let data_type = dataset
+            .column_type(column)
+            .ok_or_else(|| BiasError::MissingColumn(column.clone()))?;
+        if !is_numeric_type(data_type) {
+            continue;
+        }
+
+        let values = collect_numeric_column(dataset, column)?;
+        let mut grouped_values = vec![Vec::<f64>::new(); group_order.len()];
+        for (group_key, value) in group_keys.iter().zip(values.iter()) {
+            if let Some(value) = value {
+                grouped_values[group_index[group_key]].push(*value);
+            } else if !config.drop_missing {
+                grouped_values[group_index[group_key]].push(f64::NAN);
+            }
+        }
+        if grouped_values.iter().filter(|values| !values.is_empty()).count() < 2 {
+            skipped.push(SkippedAnalysis {
+                detector: DetectorKind::NumericDistribution,
+                grouping: grouping.label.clone(),
+                target_column: Some(column.clone()),
+                reason: "numeric values were not present in at least two groups".to_string(),
+            });
+            continue;
+        }
+
+        if grouped_values.len() == 2 {
+            let left = grouped_values[0]
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .collect::<Vec<_>>();
+            let right = grouped_values[1]
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .collect::<Vec<_>>();
+            let Some(test) = mann_whitney_u(&left, &right) else {
+                skipped.push(SkippedAnalysis {
+                    detector: DetectorKind::NumericDistribution,
+                    grouping: grouping.label.clone(),
+                    target_column: Some(column.clone()),
+                    reason: "mann-whitney test could not be evaluated".to_string(),
+                });
+                continue;
+            };
+            if test.p_value <= alpha {
+                let delta = cliffs_delta(&left, &right).unwrap_or(0.0);
+                let left_median = median(&left);
+                let right_median = median(&right);
+                findings.push(Finding {
+                    detector: DetectorKind::NumericDistribution,
+                    grouping: grouping.label.clone(),
+                    sensitive_columns: grouping.columns.clone(),
+                    target_column: Some(column.clone()),
+                    group: None,
+                    severity: if delta.abs() >= 0.33 {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
+                    message: format!(
+                        "numeric values for `{column}` differ across sensitive groups"
+                    ),
+                    p_value: Some(test.p_value),
+                    corrected_p_value: None,
+                    effect_size: Some(delta),
+                    metrics: BTreeMap::from([
+                        ("u_statistic".to_string(), test.u_statistic),
+                        ("left_median".to_string(), left_median),
+                        ("right_median".to_string(), right_median),
+                    ]),
+                });
+            }
+        } else {
+            let finite_groups = grouped_values
+                .iter()
+                .map(|values| {
+                    values
+                        .iter()
+                        .copied()
+                        .filter(|value| value.is_finite())
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let Some(test) = kruskal_wallis(&finite_groups) else {
+                skipped.push(SkippedAnalysis {
+                    detector: DetectorKind::NumericDistribution,
+                    grouping: grouping.label.clone(),
+                    target_column: Some(column.clone()),
+                    reason: "kruskal-wallis test could not be evaluated".to_string(),
+                });
+                continue;
+            };
+            if test.p_value <= alpha {
+                findings.push(Finding {
+                    detector: DetectorKind::NumericDistribution,
+                    grouping: grouping.label.clone(),
+                    sensitive_columns: grouping.columns.clone(),
+                    target_column: Some(column.clone()),
+                    group: None,
+                    severity: if test.epsilon_squared >= 0.26 {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
+                    message: format!(
+                        "numeric values for `{column}` differ across sensitive groups"
+                    ),
+                    p_value: Some(test.p_value),
+                    corrected_p_value: None,
+                    effect_size: Some(test.epsilon_squared),
+                    metrics: BTreeMap::from([
+                        ("kruskal_wallis_h".to_string(), test.statistic),
+                        (
+                            "degrees_of_freedom".to_string(),
+                            test.degrees_of_freedom as f64,
+                        ),
+                        ("epsilon_squared".to_string(), test.epsilon_squared),
+                    ]),
+                });
+            }
+        }
+    }
+
+    Ok(findings)
+}
+
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let middle = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        (sorted[middle - 1] + sorted[middle]) / 2.0
+    } else {
+        sorted[middle]
+    }
+}
+
 fn count_groups(group_keys: &[String]) -> BTreeMap<String, usize> {
     let mut counts = BTreeMap::new();
     for group_key in group_keys {
@@ -780,5 +996,27 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.detector == DetectorKind::CategoricalAssociation));
+    }
+
+    #[test]
+    fn numeric_audit_flags_rank_shift() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        writeln!(
+            file,
+            "gender,age\nwoman,22\nwoman,23\nwoman,24\nwoman,25\nwoman,26\nman,40\nman,41\nman,42\nman,43\nman,44"
+        )
+        .expect("write csv");
+
+        let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
+        let config = AuditConfig::builder()
+            .sensitive_column("gender")
+            .min_group_size(2)
+            .build();
+
+        let report = audit_dataset(&dataset, &config).expect("audit report");
+        assert!(report
+            .findings
+            .iter()
+            .any(|finding| finding.detector == DetectorKind::NumericDistribution));
     }
 }
