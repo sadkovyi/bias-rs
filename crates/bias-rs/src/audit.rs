@@ -6,8 +6,8 @@ use crate::config::{
 };
 use crate::report::{AuditReportConfig, DetectorRun, GroupSummary};
 use crate::stats::{
-    chi_square_test, cliffs_delta, cramers_v, fisher_exact_2x2, goodness_of_fit, kruskal_wallis,
-    mann_whitney_u, normalized_entropy,
+    benjamini_hochberg, chi_square_test, cliffs_delta, cramers_v, fisher_exact_2x2,
+    goodness_of_fit, kruskal_wallis, mann_whitney_u, normalized_entropy,
 };
 use crate::table::{
     GroupingSpec, analysis_columns, build_group_keys, collect_null_flags, collect_numeric_column,
@@ -97,7 +97,7 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
         );
         let baseline = config.reference_distributions.get(&grouping.label);
         let mut grouping_findings =
-            representation_findings(grouping, &counts, baseline, &representation_config, config.alpha);
+            representation_findings(grouping, &counts, baseline, &representation_config);
         findings.append(&mut grouping_findings);
         group_summaries.extend(summaries);
         detector_runs.push(DetectorRun {
@@ -121,7 +121,6 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                 &counts,
                 &analysis_columns,
                 settings,
-                config.alpha,
                 config.min_group_size,
                 &mut skipped,
             )?;
@@ -147,7 +146,6 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                 &group_keys,
                 &analysis_columns,
                 settings,
-                config.alpha,
                 config.min_group_size,
                 &mut skipped,
             )?;
@@ -173,7 +171,6 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                 &group_keys,
                 &analysis_columns,
                 settings,
-                config.alpha,
                 config.min_group_size,
                 &mut skipped,
             )?;
@@ -199,6 +196,8 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
             .then_with(|| left.group.cmp(&right.group))
             .then_with(|| left.target_column.cmp(&right.target_column))
     });
+    findings = finalize_findings(findings, config.alpha, config.multiple_testing);
+    refresh_detector_runs(&mut detector_runs, &findings);
 
     Ok(AuditReport {
         dataset: DatasetSummary {
@@ -229,6 +228,46 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
     })
 }
 
+fn finalize_findings(
+    mut findings: Vec<Finding>,
+    alpha: f64,
+    multiple_testing: crate::MultipleTestingCorrection,
+) -> Vec<Finding> {
+    let p_values = findings
+        .iter()
+        .filter_map(|finding| finding.p_value)
+        .collect::<Vec<_>>();
+    let adjusted = match multiple_testing {
+        crate::MultipleTestingCorrection::None => p_values.clone(),
+        crate::MultipleTestingCorrection::BenjaminiHochberg => benjamini_hochberg(&p_values),
+    };
+
+    let mut adjusted_index = 0usize;
+    for finding in &mut findings {
+        if finding.p_value.is_some() {
+            finding.corrected_p_value = adjusted.get(adjusted_index).copied();
+            adjusted_index += 1;
+        }
+    }
+
+    findings.retain(|finding| {
+        finding
+            .corrected_p_value
+            .map(|corrected| corrected <= alpha)
+            .unwrap_or(true)
+    });
+    findings
+}
+
+fn refresh_detector_runs(detector_runs: &mut [DetectorRun], findings: &[Finding]) {
+    for run in detector_runs {
+        run.finding_count = findings
+            .iter()
+            .filter(|finding| finding.detector == run.detector && finding.grouping == run.grouping)
+            .count();
+    }
+}
+
 fn missingness_findings(
     dataset: &Dataset,
     grouping: &GroupingSpec,
@@ -236,7 +275,6 @@ fn missingness_findings(
     group_counts: &BTreeMap<String, usize>,
     analysis_columns: &[String],
     config: &MissingnessConfig,
-    alpha: f64,
     min_group_size: usize,
     skipped: &mut Vec<SkippedAnalysis>,
 ) -> Result<Vec<Finding>, BiasError> {
@@ -330,33 +368,31 @@ fn missingness_findings(
         };
 
         if let Some(p_value) = p_value {
-            if p_value <= alpha {
-                findings.push(Finding {
-                    detector: DetectorKind::Missingness,
-                    grouping: grouping.label.clone(),
-                    sensitive_columns: grouping.columns.clone(),
-                    target_column: Some(column.clone()),
-                    group: None,
-                    severity: if rate_gap >= 0.25 {
-                        Severity::Critical
-                    } else {
-                        Severity::Warning
-                    },
-                    message: format!("missing values for `{column}` vary across sensitive groups"),
-                    p_value: Some(p_value),
-                    corrected_p_value: None,
-                    effect_size,
-                    metrics: BTreeMap::from([
-                        ("max_missing_rate".to_string(), max_missing_rate),
-                        ("min_missing_rate".to_string(), min_missing_rate),
-                        ("missing_rate_gap".to_string(), rate_gap),
-                        (
-                            "min_expected_count".to_string(),
-                            min_expected_count.unwrap_or(0.0),
-                        ),
-                    ]),
-                });
-            }
+            findings.push(Finding {
+                detector: DetectorKind::Missingness,
+                grouping: grouping.label.clone(),
+                sensitive_columns: grouping.columns.clone(),
+                target_column: Some(column.clone()),
+                group: None,
+                severity: if rate_gap >= 0.25 {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                message: format!("missing values for `{column}` vary across sensitive groups"),
+                p_value: Some(p_value),
+                corrected_p_value: None,
+                effect_size,
+                metrics: BTreeMap::from([
+                    ("max_missing_rate".to_string(), max_missing_rate),
+                    ("min_missing_rate".to_string(), min_missing_rate),
+                    ("missing_rate_gap".to_string(), rate_gap),
+                    (
+                        "min_expected_count".to_string(),
+                        min_expected_count.unwrap_or(0.0),
+                    ),
+                ]),
+            });
         }
     }
 
@@ -369,7 +405,6 @@ fn categorical_association_findings(
     group_keys: &[String],
     analysis_columns: &[String],
     config: &CategoricalAssociationConfig,
-    alpha: f64,
     min_group_size: usize,
     skipped: &mut Vec<SkippedAnalysis>,
 ) -> Result<Vec<Finding>, BiasError> {
@@ -444,38 +479,36 @@ fn categorical_association_findings(
             continue;
         };
 
-        if chi_square.p_value <= alpha {
-            findings.push(Finding {
-                detector: DetectorKind::CategoricalAssociation,
-                grouping: grouping.label.clone(),
-                sensitive_columns: grouping.columns.clone(),
-                target_column: Some(column.clone()),
-                group: None,
-                severity: if cramers_v(&table, chi_square.statistic).unwrap_or(0.0) >= 0.3 {
-                    Severity::Critical
-                } else {
-                    Severity::Warning
-                },
-                message: format!(
-                    "categorical values for `{column}` are distributed differently across sensitive groups"
+        findings.push(Finding {
+            detector: DetectorKind::CategoricalAssociation,
+            grouping: grouping.label.clone(),
+            sensitive_columns: grouping.columns.clone(),
+            target_column: Some(column.clone()),
+            group: None,
+            severity: if cramers_v(&table, chi_square.statistic).unwrap_or(0.0) >= 0.3 {
+                Severity::Critical
+            } else {
+                Severity::Warning
+            },
+            message: format!(
+                "categorical values for `{column}` are distributed differently across sensitive groups"
+            ),
+            p_value: Some(chi_square.p_value),
+            corrected_p_value: None,
+            effect_size: cramers_v(&table, chi_square.statistic),
+            metrics: BTreeMap::from([
+                ("chi_square".to_string(), chi_square.statistic),
+                (
+                    "degrees_of_freedom".to_string(),
+                    chi_square.degrees_of_freedom as f64,
                 ),
-                p_value: Some(chi_square.p_value),
-                corrected_p_value: None,
-                effect_size: cramers_v(&table, chi_square.statistic),
-                metrics: BTreeMap::from([
-                    ("chi_square".to_string(), chi_square.statistic),
-                    (
-                        "degrees_of_freedom".to_string(),
-                        chi_square.degrees_of_freedom as f64,
-                    ),
-                    (
-                        "min_expected_count".to_string(),
-                        chi_square.min_expected_count,
-                    ),
-                    ("category_count".to_string(), category_order.len() as f64),
-                ]),
-            });
-        }
+                (
+                    "min_expected_count".to_string(),
+                    chi_square.min_expected_count,
+                ),
+                ("category_count".to_string(), category_order.len() as f64),
+            ]),
+        });
     }
 
     Ok(findings)
@@ -527,7 +560,6 @@ fn numeric_distribution_findings(
     group_keys: &[String],
     analysis_columns: &[String],
     config: &NumericDistributionConfig,
-    alpha: f64,
     min_group_size: usize,
     skipped: &mut Vec<SkippedAnalysis>,
 ) -> Result<Vec<Finding>, BiasError> {
@@ -607,34 +639,30 @@ fn numeric_distribution_findings(
                 });
                 continue;
             };
-            if test.p_value <= alpha {
-                let delta = cliffs_delta(&left, &right).unwrap_or(0.0);
-                let left_median = median(&left);
-                let right_median = median(&right);
-                findings.push(Finding {
-                    detector: DetectorKind::NumericDistribution,
-                    grouping: grouping.label.clone(),
-                    sensitive_columns: grouping.columns.clone(),
-                    target_column: Some(column.clone()),
-                    group: None,
-                    severity: if delta.abs() >= 0.33 {
-                        Severity::Critical
-                    } else {
-                        Severity::Warning
-                    },
-                    message: format!(
-                        "numeric values for `{column}` differ across sensitive groups"
-                    ),
-                    p_value: Some(test.p_value),
-                    corrected_p_value: None,
-                    effect_size: Some(delta),
-                    metrics: BTreeMap::from([
-                        ("u_statistic".to_string(), test.u_statistic),
-                        ("left_median".to_string(), left_median),
-                        ("right_median".to_string(), right_median),
-                    ]),
-                });
-            }
+            let delta = cliffs_delta(&left, &right).unwrap_or(0.0);
+            let left_median = median(&left);
+            let right_median = median(&right);
+            findings.push(Finding {
+                detector: DetectorKind::NumericDistribution,
+                grouping: grouping.label.clone(),
+                sensitive_columns: grouping.columns.clone(),
+                target_column: Some(column.clone()),
+                group: None,
+                severity: if delta.abs() >= 0.33 {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                message: format!("numeric values for `{column}` differ across sensitive groups"),
+                p_value: Some(test.p_value),
+                corrected_p_value: None,
+                effect_size: Some(delta),
+                metrics: BTreeMap::from([
+                    ("u_statistic".to_string(), test.u_statistic),
+                    ("left_median".to_string(), left_median),
+                    ("right_median".to_string(), right_median),
+                ]),
+            });
         } else {
             let finite_groups = grouped_values
                 .iter()
@@ -655,34 +683,30 @@ fn numeric_distribution_findings(
                 });
                 continue;
             };
-            if test.p_value <= alpha {
-                findings.push(Finding {
-                    detector: DetectorKind::NumericDistribution,
-                    grouping: grouping.label.clone(),
-                    sensitive_columns: grouping.columns.clone(),
-                    target_column: Some(column.clone()),
-                    group: None,
-                    severity: if test.epsilon_squared >= 0.26 {
-                        Severity::Critical
-                    } else {
-                        Severity::Warning
-                    },
-                    message: format!(
-                        "numeric values for `{column}` differ across sensitive groups"
+            findings.push(Finding {
+                detector: DetectorKind::NumericDistribution,
+                grouping: grouping.label.clone(),
+                sensitive_columns: grouping.columns.clone(),
+                target_column: Some(column.clone()),
+                group: None,
+                severity: if test.epsilon_squared >= 0.26 {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                message: format!("numeric values for `{column}` differ across sensitive groups"),
+                p_value: Some(test.p_value),
+                corrected_p_value: None,
+                effect_size: Some(test.epsilon_squared),
+                metrics: BTreeMap::from([
+                    ("kruskal_wallis_h".to_string(), test.statistic),
+                    (
+                        "degrees_of_freedom".to_string(),
+                        test.degrees_of_freedom as f64,
                     ),
-                    p_value: Some(test.p_value),
-                    corrected_p_value: None,
-                    effect_size: Some(test.epsilon_squared),
-                    metrics: BTreeMap::from([
-                        ("kruskal_wallis_h".to_string(), test.statistic),
-                        (
-                            "degrees_of_freedom".to_string(),
-                            test.degrees_of_freedom as f64,
-                        ),
-                        ("epsilon_squared".to_string(), test.epsilon_squared),
-                    ]),
-                });
-            }
+                    ("epsilon_squared".to_string(), test.epsilon_squared),
+                ]),
+            });
         }
     }
 
@@ -740,7 +764,6 @@ fn representation_findings(
     counts: &BTreeMap<String, usize>,
     baseline: Option<&crate::ReferenceDistribution>,
     config: &RepresentationConfig,
-    alpha: f64,
 ) -> Vec<Finding> {
     let total = counts.values().sum::<usize>();
     if total == 0 {
@@ -766,34 +789,32 @@ fn representation_findings(
             .collect::<Vec<_>>();
         if expected.len() == observed.len() {
             if let Some(test) = goodness_of_fit(&observed, &expected) {
-                if test.p_value <= alpha {
-                    findings.push(Finding {
-                        detector: DetectorKind::Representation,
-                        grouping: grouping.label.clone(),
-                        sensitive_columns: grouping.columns.clone(),
-                        target_column: None,
-                        group: None,
-                        severity: if imbalance_ratio < config.critical_ratio {
-                            Severity::Critical
-                        } else {
-                            Severity::Warning
-                        },
-                        message: "group proportions differ from the configured reference distribution"
-                            .to_string(),
-                        p_value: Some(test.p_value),
-                        corrected_p_value: None,
-                        effect_size: None,
-                        metrics: BTreeMap::from([
-                            ("chi_square".to_string(), test.statistic),
-                            (
-                                "min_expected_count".to_string(),
-                                test.min_expected_count,
-                            ),
-                            ("imbalance_ratio".to_string(), imbalance_ratio),
-                            ("group_count".to_string(), counts.len() as f64),
-                        ]),
-                    });
-                }
+                findings.push(Finding {
+                    detector: DetectorKind::Representation,
+                    grouping: grouping.label.clone(),
+                    sensitive_columns: grouping.columns.clone(),
+                    target_column: None,
+                    group: None,
+                    severity: if imbalance_ratio < config.critical_ratio {
+                        Severity::Critical
+                    } else {
+                        Severity::Warning
+                    },
+                    message: "group proportions differ from the configured reference distribution"
+                        .to_string(),
+                    p_value: Some(test.p_value),
+                    corrected_p_value: None,
+                    effect_size: None,
+                    metrics: BTreeMap::from([
+                        ("chi_square".to_string(), test.statistic),
+                        (
+                            "min_expected_count".to_string(),
+                            test.min_expected_count,
+                        ),
+                        ("imbalance_ratio".to_string(), imbalance_ratio),
+                        ("group_count".to_string(), counts.len() as f64),
+                    ]),
+                });
             }
         }
 
@@ -1018,5 +1039,28 @@ mod tests {
             .findings
             .iter()
             .any(|finding| finding.detector == DetectorKind::NumericDistribution));
+    }
+
+    #[test]
+    fn corrected_p_values_are_recorded() {
+        let mut file = NamedTempFile::new().expect("temp file");
+        writeln!(
+            file,
+            "gender,age,region\nwoman,22,north\nwoman,23,north\nwoman,24,north\nwoman,25,north\nwoman,26,south\nwoman,27,south\nman,40,south\nman,41,south\nman,42,south\nman,43,south\nman,44,north\nman,45,north"
+        )
+        .expect("write csv");
+
+        let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
+        let config = AuditConfig::builder()
+            .sensitive_column("gender")
+            .min_group_size(2)
+            .build();
+
+        let report = audit_dataset(&dataset, &config).expect("audit report");
+        assert!(report
+            .findings
+            .iter()
+            .filter(|finding| finding.p_value.is_some())
+            .all(|finding| finding.corrected_p_value.is_some()));
     }
 }
