@@ -18,6 +18,7 @@ pub use config::{
 pub use dataset::Dataset;
 pub use error::BiasError;
 pub use io::csv::{CsvReadOptions, read_csv};
+pub use io::parquet::{ParquetReadOptions, read_parquet};
 pub use report::{
     AuditReport, ColumnProfile, DatasetSummary, DetectorRun, Finding, GroupSummary, Severity,
     SkippedAnalysis,

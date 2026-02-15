@@ -13,6 +13,8 @@ pub enum BiasError {
     Io(#[from] std::io::Error),
     #[error("csv error: {0}")]
     Csv(String),
+    #[error("parquet error: {0}")]
+    Parquet(String),
     #[error("{0}")]
     Message(String),
 }

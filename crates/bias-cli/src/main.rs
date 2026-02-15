@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use bias_rs::{
     AuditConfig, CategoricalAssociationConfig, ColumnSelection, DetectorConfig, DetectorKind,
     GroupingMode, MissingnessConfig, MultipleTestingCorrection, NumericDistributionConfig,
-    ReferenceDistribution, RepresentationConfig, audit_dataset, read_csv,
+    ReferenceDistribution, RepresentationConfig, audit_dataset, read_csv, read_parquet,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -52,6 +52,7 @@ struct AuditArgs {
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum InputFormat {
     Csv,
+    Parquet,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -104,6 +105,7 @@ fn run(cli: Cli) -> Result<String, String> {
 fn run_audit(args: AuditArgs) -> Result<String, String> {
     let dataset = match args.format {
         InputFormat::Csv => read_csv(&args.input, bias_rs::CsvReadOptions::default()),
+        InputFormat::Parquet => read_parquet(&args.input, bias_rs::ParquetReadOptions::default()),
     }
     .map_err(|error| error.to_string())?;
 
