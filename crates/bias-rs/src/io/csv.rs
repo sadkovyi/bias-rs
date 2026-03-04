@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow_array::builder::{BooleanBuilder, Float64Builder, Int64Builder, StringBuilder};
-use arrow_array::{ArrayRef, BooleanArray, Float64Array, Int64Array, RecordBatch, StringArray};
+use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 
 use crate::{BiasError, Dataset};
@@ -168,7 +168,7 @@ fn build_array(
                     None => builder.append_null(),
                 }
             }
-            Ok(Arc::new(BooleanArray::from(builder.finish())) as ArrayRef)
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         DataType::Int64 => {
             let mut builder = Int64Builder::with_capacity(rows.len());
@@ -178,7 +178,7 @@ fn build_array(
                     None => builder.append_null(),
                 }
             }
-            Ok(Arc::new(Int64Array::from(builder.finish())) as ArrayRef)
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         DataType::Float64 => {
             let mut builder = Float64Builder::with_capacity(rows.len());
@@ -188,7 +188,7 @@ fn build_array(
                     None => builder.append_null(),
                 }
             }
-            Ok(Arc::new(Float64Array::from(builder.finish())) as ArrayRef)
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         DataType::Utf8 => {
             let mut builder = StringBuilder::with_capacity(rows.len(), rows.len() * 8);
@@ -198,7 +198,7 @@ fn build_array(
                     None => builder.append_null(),
                 }
             }
-            Ok(Arc::new(StringArray::from(builder.finish())) as ArrayRef)
+            Ok(Arc::new(builder.finish()) as ArrayRef)
         }
         other => Err(BiasError::UnsupportedColumnType {
             column: column_name.to_string(),

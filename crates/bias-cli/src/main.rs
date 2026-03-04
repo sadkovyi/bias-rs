@@ -198,8 +198,11 @@ fn render_report(report: &bias_rs::AuditReport) -> String {
     output.push_str("Detector runs\n");
     for run in &report.detector_runs {
         output.push_str(&format!(
-            "- {:?} on {}: {} findings across {} columns\n",
-            run.detector, run.grouping, run.finding_count, run.analyzed_columns
+            "- {} on {}: {} findings across {} columns\n",
+            detector_name(run.detector),
+            run.grouping,
+            run.finding_count,
+            run.analyzed_columns
         ));
     }
     output.push('\n');
@@ -222,8 +225,8 @@ fn render_report(report: &bias_rs::AuditReport) -> String {
         output.push_str("Skipped analyses\n");
         for skipped in &report.skipped {
             output.push_str(&format!(
-                "- {:?} on {}{}: {}\n",
-                skipped.detector,
+                "- {} on {}{}: {}\n",
+                detector_name(skipped.detector),
                 skipped.grouping,
                 skipped
                     .target_column
@@ -242,8 +245,10 @@ fn render_report(report: &bias_rs::AuditReport) -> String {
     } else {
         for finding in &report.findings {
             output.push_str(&format!(
-                "- {:?} {:?}: {}",
-                finding.detector, finding.severity, finding.message
+                "- {} {}: {}",
+                detector_name(finding.detector),
+                severity_name(finding.severity),
+                finding.message
             ));
             if let Some(column) = &finding.target_column {
                 output.push_str(&format!(" [column: {column}]"));
@@ -259,6 +264,23 @@ fn render_report(report: &bias_rs::AuditReport) -> String {
     }
 
     output.trim_end().to_string()
+}
+
+fn detector_name(detector: DetectorKind) -> &'static str {
+    match detector {
+        DetectorKind::Representation => "representation",
+        DetectorKind::Missingness => "missingness",
+        DetectorKind::CategoricalAssociation => "categorical association",
+        DetectorKind::NumericDistribution => "numeric distribution",
+    }
+}
+
+fn severity_name(severity: bias_rs::Severity) -> &'static str {
+    match severity {
+        bias_rs::Severity::Info => "info",
+        bias_rs::Severity::Warning => "warning",
+        bias_rs::Severity::Critical => "critical",
+    }
 }
 
 impl From<CliGroupingMode> for GroupingMode {

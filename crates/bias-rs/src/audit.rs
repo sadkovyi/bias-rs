@@ -118,7 +118,6 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
                 dataset,
                 grouping,
                 &group_keys,
-                &counts,
                 &analysis_columns,
                 settings,
                 config.min_group_size,
@@ -272,12 +271,12 @@ fn missingness_findings(
     dataset: &Dataset,
     grouping: &GroupingSpec,
     group_keys: &[String],
-    group_counts: &BTreeMap<String, usize>,
     analysis_columns: &[String],
     config: &MissingnessConfig,
     min_group_size: usize,
     skipped: &mut Vec<SkippedAnalysis>,
 ) -> Result<Vec<Finding>, BiasError> {
+    let group_counts = count_groups(group_keys);
     if group_counts.len() < 2 {
         skipped.push(SkippedAnalysis {
             detector: DetectorKind::Missingness,
