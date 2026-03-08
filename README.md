@@ -1,10 +1,11 @@
 # bias-rs
 
-`bias-rs` is a Rust library and CLI for checking bias in tabular datasets.
+`bias-rs` is a Rust library and CLI for auditing tabular datasets, especially
+the metadata tables that sit around AI/ML training and evaluation data.
 
 The project is about dataset composition. It does not inspect model outputs,
-predictions, or fairness metrics tied to a classifier. Given a dataset plus one
-or more sensitive columns, it looks for patterns such as group imbalance,
+predictions, or fairness metrics tied to a classifier. Given a CSV or Parquet
+table plus one or more sensitive columns, it looks for group imbalance,
 missingness differences, categorical distribution shifts, and numeric
 distribution shifts.
 
@@ -12,11 +13,10 @@ distribution shifts.
 
 The library can:
 
-- read CSV files
-- read Parquet files
-- audit one sensitive column at a time
-- audit intersectional groupings
-- emit JSON reports
+- read CSV and Parquet metadata tables
+- audit one sensitive column at a time or intersectionally
+- check representation, missingness, and feature shifts across groups
+- emit JSON reports for automation
 - emit plain-text CLI reports
 - apply multiple-testing correction across statistical findings
 
@@ -25,7 +25,7 @@ The library does not:
 - make causal claims
 - infer what the "right" population mix should be unless you provide a
   reference distribution
-- analyze model behavior
+- inspect model outputs, predictions, or fairness metrics
 
 ## Detectors
 
@@ -36,12 +36,22 @@ The library does not:
    goodness-of-fit test.
 2. Missingness checks compare null rates across sensitive groups.
 3. Categorical association checks compare sensitive groups against categorical
-   feature values with a contingency-table test.
-4. Numeric distribution checks compare numeric feature distributions with
-   rank-based tests.
+   feature values such as `label`, `source`, or `split` with a
+   contingency-table test.
+4. Numeric distribution checks compare numeric feature distributions such as
+   `token_count`, `duration_seconds`, or `age` with rank-based tests.
 
 By default, statistical findings are filtered with Benjamini-Hochberg
 correction.
+
+## Where this fits in ML workflows
+
+- check the composition of a training or evaluation dataset before model work
+- spot missingness, source skew, or label skew across sensitive groups
+- emit JSON reports for CI jobs or recurring dataset review steps
+
+For text, image, audio, or multimodal corpora, the expected input is still a
+CSV or Parquet metadata table rather than the raw assets themselves.
 
 ## CLI quick start
 
@@ -55,11 +65,12 @@ Run an audit against a CSV file:
 
 ```bash
 cargo run -p bias-cli -- audit \
-  --input data/employees.csv \
+  --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
-  --sensitive race \
+  --sensitive age_bucket \
   --grouping both \
+  --columns label,source,token_count \
   --output text
 ```
 
@@ -67,9 +78,10 @@ Ask for JSON instead:
 
 ```bash
 cargo run -p bias-cli -- audit \
-  --input data/employees.csv \
+  --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
+  --columns label,source,token_count \
   --output json
 ```
 
@@ -77,9 +89,10 @@ Read Parquet instead of CSV:
 
 ```bash
 cargo run -p bias-cli -- audit \
-  --input data/employees.parquet \
+  --input data/training_metadata.parquet \
   --format parquet \
   --sensitive gender \
+  --columns label,source,token_count \
   --output text
 ```
 
@@ -87,32 +100,34 @@ Limit the audit to a subset of columns:
 
 ```bash
 cargo run -p bias-cli -- audit \
-  --input data/employees.csv \
+  --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
-  --columns age,region,tenure \
+  --columns label,source,token_count \
   --detector representation \
   --detector numeric-distribution
 ```
 
 ## Expected distributions
 
-If you want representation checks to compare the dataset against a known
-baseline, pass a JSON file with group proportions keyed by grouping name.
+If you want representation checks to compare a training or evaluation set
+against a target mix, pass a JSON file with group proportions keyed by grouping
+name. That target might come from a benchmark spec, an annotation plan, or an
+external baseline.
 
 Example file:
 
 ```json
 {
   "gender": {
-    "woman": 0.51,
-    "man": 0.49
+    "woman": 0.5,
+    "man": 0.5
   },
-  "gender+race": {
-    "gender=woman|race=asian": 0.12,
-    "gender=woman|race=white": 0.39,
-    "gender=man|race=asian": 0.11,
-    "gender=man|race=white": 0.38
+  "gender+age_bucket": {
+    "gender=woman|age_bucket=18-34": 0.26,
+    "gender=woman|age_bucket=35-54": 0.24,
+    "gender=man|age_bucket=18-34": 0.25,
+    "gender=man|age_bucket=35-54": 0.25
   }
 }
 ```
@@ -121,21 +136,34 @@ Use it from the CLI:
 
 ```bash
 cargo run -p bias-cli -- audit \
-  --input data/employees.csv \
+  --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
+  --sensitive age_bucket \
+  --grouping both \
   --expected-dist expected.json
 ```
 
 ## Library example
 
 ```rust
-use bias_rs::{AuditConfig, CsvReadOptions, audit_dataset, read_csv};
+use bias_rs::{
+    AuditConfig, ColumnSelection, GroupingMode, ParquetReadOptions, audit_dataset, read_parquet,
+};
 
-let dataset = read_csv("data/employees.csv", CsvReadOptions::default())?;
+let dataset = read_parquet(
+    "data/training_metadata.parquet",
+    ParquetReadOptions::default(),
+)?;
 let config = AuditConfig::builder()
-    .sensitive_column("gender")
-    .min_group_size(20)
+    .sensitive_columns(["gender", "age_bucket"])
+    .grouping_mode(GroupingMode::Both)
+    .analysis_columns(ColumnSelection::Named(vec![
+        "label".into(),
+        "source".into(),
+        "token_count".into(),
+    ]))
+    .min_group_size(50)
     .build();
 let report = audit_dataset(&dataset, &config)?;
 
@@ -157,6 +185,7 @@ An `AuditReport` includes:
   was used
 
 The CLI prints the same report either as JSON or as a readable text summary.
+The JSON form is easy to feed into automated dataset checks.
 
 More detail is in:
 
