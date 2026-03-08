@@ -172,10 +172,3 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
-
-## Notes on interpretation
-
-This library can tell you that groups are imbalanced or that feature
-distributions differ across groups. It cannot tell you why those differences
-exist, whether they are legally problematic, or whether a downstream model will
-amplify them. Those questions need domain context.
