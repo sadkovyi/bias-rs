@@ -341,7 +341,10 @@ fn missingness_findings(
 
         let chi_square = chi_square_test(&table);
         let fisher_p_value = if table.len() == 2
-            && table.iter().flat_map(|row| row.iter()).any(|value| *value < config.sparse_table_threshold as u64)
+            && table
+                .iter()
+                .flat_map(|row| row.iter())
+                .any(|value| *value < config.sparse_table_threshold as u64)
         {
             fisher_exact_2x2([[table[0][0], table[0][1]], [table[1][0], table[1][1]]])
         } else {
@@ -608,7 +611,12 @@ fn numeric_distribution_findings(
                 grouped_values[group_index[group_key]].push(f64::NAN);
             }
         }
-        if grouped_values.iter().filter(|values| !values.is_empty()).count() < 2 {
+        if grouped_values
+            .iter()
+            .filter(|values| !values.is_empty())
+            .count()
+            < 2
+        {
             skipped.push(SkippedAnalysis {
                 detector: DetectorKind::NumericDistribution,
                 grouping: grouping.label.clone(),
@@ -753,7 +761,8 @@ fn build_group_summaries(
             } else {
                 0.0
             },
-            expected_proportion: baseline.and_then(|distribution| distribution.groups.get(group).copied()),
+            expected_proportion: baseline
+                .and_then(|distribution| distribution.groups.get(group).copied()),
         })
         .collect()
 }
@@ -781,7 +790,11 @@ fn representation_findings(
 
     let mut findings = Vec::new();
     if let Some(distribution) = baseline {
-        let observed = counts.values().copied().map(|count| count as u64).collect::<Vec<_>>();
+        let observed = counts
+            .values()
+            .copied()
+            .map(|count| count as u64)
+            .collect::<Vec<_>>();
         let expected = counts
             .keys()
             .filter_map(|group| distribution.groups.get(group).copied())
@@ -806,10 +819,7 @@ fn representation_findings(
                     effect_size: None,
                     metrics: BTreeMap::from([
                         ("chi_square".to_string(), test.statistic),
-                        (
-                            "min_expected_count".to_string(),
-                            test.min_expected_count,
-                        ),
+                        ("min_expected_count".to_string(), test.min_expected_count),
                         ("imbalance_ratio".to_string(), imbalance_ratio),
                         ("group_count".to_string(), counts.len() as f64),
                     ]),
@@ -877,10 +887,7 @@ fn representation_findings(
                         ("row_count".to_string(), *count as f64),
                         ("proportion".to_string(), *count as f64 / total_f),
                         ("representation_ratio".to_string(), ratio),
-                        (
-                            "normalized_entropy".to_string(),
-                            entropy.unwrap_or(0.0),
-                        ),
+                        ("normalized_entropy".to_string(), entropy.unwrap_or(0.0)),
                     ]),
                 });
             }
@@ -897,9 +904,9 @@ mod tests {
 
     use tempfile::NamedTempFile;
 
+    use crate::DetectorKind;
     use crate::config::{AuditConfig, GroupingMode, ReferenceDistribution};
     use crate::io::csv::{CsvReadOptions, read_csv};
-    use crate::DetectorKind;
 
     use super::audit_dataset;
 
@@ -941,21 +948,24 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report.findings.iter().any(|finding| finding.p_value.is_some()));
-        assert!(report
-            .group_summaries
-            .iter()
-            .all(|summary| summary.expected_proportion.is_some()));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.p_value.is_some())
+        );
+        assert!(
+            report
+                .group_summaries
+                .iter()
+                .all(|summary| summary.expected_proportion.is_some())
+        );
     }
 
     #[test]
     fn representation_audit_supports_intersectional_grouping() {
         let mut file = NamedTempFile::new().expect("temp file");
-        writeln!(
-            file,
-            "gender,race\nwoman,a\nwoman,a\nman,b\nman,b\nman,b"
-        )
-        .expect("write csv");
+        writeln!(file, "gender,race\nwoman,a\nwoman,a\nman,b\nman,b\nman,b").expect("write csv");
 
         let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
         let config = AuditConfig::builder()
@@ -964,14 +974,18 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report
-            .group_summaries
-            .iter()
-            .any(|summary| summary.grouping == "gender+race"));
-        assert!(report
-            .detector_runs
-            .iter()
-            .any(|run| run.grouping == "gender+race"));
+        assert!(
+            report
+                .group_summaries
+                .iter()
+                .any(|summary| summary.grouping == "gender+race")
+        );
+        assert!(
+            report
+                .detector_runs
+                .iter()
+                .any(|run| run.grouping == "gender+race")
+        );
     }
 
     #[test]
@@ -990,10 +1004,12 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| finding.detector == DetectorKind::Missingness));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.detector == DetectorKind::Missingness)
+        );
     }
 
     #[test]
@@ -1012,10 +1028,12 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| finding.detector == DetectorKind::CategoricalAssociation));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.detector == DetectorKind::CategoricalAssociation)
+        );
     }
 
     #[test]
@@ -1034,10 +1052,12 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report
-            .findings
-            .iter()
-            .any(|finding| finding.detector == DetectorKind::NumericDistribution));
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.detector == DetectorKind::NumericDistribution)
+        );
     }
 
     #[test]
@@ -1056,10 +1076,12 @@ mod tests {
             .build();
 
         let report = audit_dataset(&dataset, &config).expect("audit report");
-        assert!(report
-            .findings
-            .iter()
-            .filter(|finding| finding.p_value.is_some())
-            .all(|finding| finding.corrected_p_value.is_some()));
+        assert!(
+            report
+                .findings
+                .iter()
+                .filter(|finding| finding.p_value.is_some())
+                .all(|finding| finding.corrected_p_value.is_some())
+        );
     }
 }

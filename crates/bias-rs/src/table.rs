@@ -71,7 +71,11 @@ pub(crate) fn build_group_keys(
     let mut keys = Vec::with_capacity(row_count);
     for row_index in 0..row_count {
         if grouping.columns.len() == 1 {
-            keys.push(columns[0][row_index].clone().unwrap_or_else(|| "<missing>".to_string()));
+            keys.push(
+                columns[0][row_index]
+                    .clone()
+                    .unwrap_or_else(|| "<missing>".to_string()),
+            );
         } else {
             let parts = grouping
                 .columns
@@ -80,9 +84,7 @@ pub(crate) fn build_group_keys(
                 .map(|(column, values)| {
                     format!(
                         "{column}={}",
-                        values[row_index]
-                            .as_deref()
-                            .unwrap_or("<missing>")
+                        values[row_index].as_deref().unwrap_or("<missing>")
                     )
                 })
                 .collect::<Vec<_>>();
@@ -169,7 +171,12 @@ pub(crate) fn analysis_columns(
         }
     }
 
-    columns.retain(|column| !config.sensitive_columns.iter().any(|sensitive| sensitive == column));
+    columns.retain(|column| {
+        !config
+            .sensitive_columns
+            .iter()
+            .any(|sensitive| sensitive == column)
+    });
     Ok(columns)
 }
 

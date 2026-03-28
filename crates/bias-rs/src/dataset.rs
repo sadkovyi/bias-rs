@@ -55,7 +55,10 @@ impl Dataset {
 
     /// Returns the data type for a named column.
     pub fn column_type(&self, name: &str) -> Option<&DataType> {
-        self.schema.field_with_name(name).ok().map(|field| field.data_type())
+        self.schema
+            .field_with_name(name)
+            .ok()
+            .map(|field| field.data_type())
     }
 
     /// Returns true when the column exists.

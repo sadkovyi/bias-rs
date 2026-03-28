@@ -295,7 +295,10 @@ mod tests {
         .expect("write csv");
 
         let dataset = read_csv(file.path(), CsvReadOptions::default()).expect("dataset");
-        assert_eq!(dataset.column_names(), vec!["group", "age", "score", "active"]);
+        assert_eq!(
+            dataset.column_names(),
+            vec!["group", "age", "score", "active"]
+        );
         assert_eq!(dataset.row_count(), 2);
         assert_eq!(dataset.column_type("age"), Some(&DataType::Int64));
         assert_eq!(dataset.column_type("score"), Some(&DataType::Float64));

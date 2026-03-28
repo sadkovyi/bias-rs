@@ -228,7 +228,8 @@ pub(crate) fn mann_whitney_u(left: &[f64], right: &[f64]) -> Option<MannWhitneyR
     values.extend(right.iter().copied().map(|value| (value, 1usize)));
     values.sort_by(|left, right| total_order(left.0, right.0));
 
-    let (ranks, tie_counts) = average_ranks(&values.iter().map(|entry| entry.0).collect::<Vec<_>>());
+    let (ranks, tie_counts) =
+        average_ranks(&values.iter().map(|entry| entry.0).collect::<Vec<_>>());
     let left_rank_sum = values
         .iter()
         .zip(ranks.iter())
@@ -366,8 +367,7 @@ fn average_ranks(values: &[f64]) -> (Vec<f64>, Vec<usize>) {
 fn hypergeometric_probability(total: u64, successes: u64, draws: u64, observed: u64) -> f64 {
     let failures = total - successes;
     let observed_failures = draws - observed;
-    let log_probability = ln_choose(successes, observed)
-        + ln_choose(failures, observed_failures)
+    let log_probability = ln_choose(successes, observed) + ln_choose(failures, observed_failures)
         - ln_choose(total, draws);
     log_probability.exp()
 }
