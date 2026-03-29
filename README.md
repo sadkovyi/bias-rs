@@ -44,6 +44,33 @@ The library does not:
 By default, statistical findings are filtered with Benjamini-Hochberg
 correction.
 
+## Severity thresholds
+
+Each detector has its own severity cutoff. A finding must first survive the
+configured p-value filter. After that, `bias-rs` marks it as `warning` or
+`critical` with detector-specific thresholds.
+
+Default thresholds:
+
+- representation: `warning_ratio = 0.8`, `critical_ratio = 0.5`
+- missingness: `critical_rate_gap = 0.25`
+- categorical association: `critical_cramers_v = 0.3`
+- numeric distribution, two groups: `critical_cliffs_delta = 0.33`
+- numeric distribution, three or more groups: `critical_epsilon_squared = 0.26`
+
+Override them from the CLI when you need a different review bar:
+
+```bash
+cargo run -p bias-cli -- audit \
+  --input data/training_metadata.csv \
+  --format csv \
+  --sensitive gender \
+  --columns label,source,token_count \
+  --missingness-critical-rate-gap 0.20 \
+  --categorical-critical-cramers-v 0.40 \
+  --numeric-critical-cliffs-delta 0.45
+```
+
 ## Where this fits in ML workflows
 
 - check the composition of a training or evaluation dataset before model work
@@ -148,7 +175,8 @@ cargo run -p bias-cli -- audit \
 
 ```rust
 use bias_rs::{
-    AuditConfig, ColumnSelection, GroupingMode, ParquetReadOptions, audit_dataset, read_parquet,
+    AuditConfig, ColumnSelection, DetectorConfig, GroupingMode, MissingnessConfig,
+    ParquetReadOptions, audit_dataset, read_parquet,
 };
 
 let dataset = read_parquet(
@@ -163,13 +191,17 @@ let config = AuditConfig::builder()
         "source".into(),
         "token_count".into(),
     ]))
+    .detector(DetectorConfig::Missingness(MissingnessConfig {
+        critical_rate_gap: 0.2,
+        ..MissingnessConfig::default()
+    }))
     .min_group_size(50)
     .build();
 let report = audit_dataset(&dataset, &config)?;
 
 println!("rows: {}", report.dataset.row_count);
 println!("findings: {}", report.findings.len());
-# Ok::<(), Box<dyn std::error::Error>>(())
+Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 ## Report shape

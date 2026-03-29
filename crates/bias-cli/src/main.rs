@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -47,6 +47,24 @@ struct AuditArgs {
     output: OutputFormat,
     #[arg(long = "expected-dist")]
     expected_distribution: Option<PathBuf>,
+    #[command(flatten)]
+    threshold_args: ThresholdArgs,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct ThresholdArgs {
+    #[arg(long = "representation-warning-ratio")]
+    representation_warning_ratio: Option<f64>,
+    #[arg(long = "representation-critical-ratio")]
+    representation_critical_ratio: Option<f64>,
+    #[arg(long = "missingness-critical-rate-gap")]
+    missingness_critical_rate_gap: Option<f64>,
+    #[arg(long = "categorical-critical-cramers-v")]
+    categorical_critical_cramers_v: Option<f64>,
+    #[arg(long = "numeric-critical-cliffs-delta")]
+    numeric_critical_cliffs_delta: Option<f64>,
+    #[arg(long = "numeric-critical-epsilon-squared")]
+    numeric_critical_epsilon_squared: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -103,12 +121,7 @@ fn run(cli: Cli) -> Result<String, String> {
 }
 
 fn run_audit(args: AuditArgs) -> Result<String, String> {
-    let dataset = match args.format {
-        InputFormat::Csv => read_csv(&args.input, bias_rs::CsvReadOptions::default()),
-        InputFormat::Parquet => read_parquet(&args.input, bias_rs::ParquetReadOptions::default()),
-    }
-    .map_err(|error| error.to_string())?;
-
+    let detectors = build_detector_configs(&args.detectors, &args.threshold_args)?;
     let mut builder = AuditConfig::builder()
         .sensitive_columns(args.sensitive_columns.clone())
         .grouping_mode(args.grouping.into())
@@ -121,7 +134,12 @@ fn run_audit(args: AuditArgs) -> Result<String, String> {
         builder = builder.analysis_columns(ColumnSelection::Named(args.columns));
     }
 
-    builder = configure_detectors(builder, &args.detectors);
+    for detector in all_detector_kinds() {
+        builder = builder.disable_detector(detector);
+    }
+    for detector in detectors {
+        builder = builder.detector(detector);
+    }
     if let Some(path) = args.expected_distribution {
         let distributions = load_reference_distributions(&path)?;
         for (grouping, distribution) in distributions {
@@ -130,6 +148,11 @@ fn run_audit(args: AuditArgs) -> Result<String, String> {
     }
 
     let config = builder.build();
+    let dataset = match args.format {
+        InputFormat::Csv => read_csv(&args.input, bias_rs::CsvReadOptions::default()),
+        InputFormat::Parquet => read_parquet(&args.input, bias_rs::ParquetReadOptions::default()),
+    }
+    .map_err(|error| error.to_string())?;
     let report = audit_dataset(&dataset, &config).map_err(|error| error.to_string())?;
 
     match args.output {
@@ -139,39 +162,115 @@ fn run_audit(args: AuditArgs) -> Result<String, String> {
     }
 }
 
-fn configure_detectors(
-    mut builder: bias_rs::AuditConfigBuilder,
-    detectors: &[CliDetector],
-) -> bias_rs::AuditConfigBuilder {
-    if detectors.is_empty() {
-        return builder;
-    }
-
-    for detector in [
+fn all_detector_kinds() -> [DetectorKind; 4] {
+    [
         DetectorKind::Representation,
         DetectorKind::Missingness,
         DetectorKind::CategoricalAssociation,
         DetectorKind::NumericDistribution,
-    ] {
-        builder = builder.disable_detector(detector);
+    ]
+}
+
+fn build_detector_configs(
+    detectors: &[CliDetector],
+    threshold_args: &ThresholdArgs,
+) -> Result<Vec<DetectorConfig>, String> {
+    let selected = selected_detector_kinds(detectors);
+    let mut representation = RepresentationConfig::default();
+    let mut missingness = MissingnessConfig::default();
+    let mut categorical = CategoricalAssociationConfig::default();
+    let mut numeric = NumericDistributionConfig::default();
+
+    if let Some(value) = threshold_args.representation_warning_ratio {
+        require_selected(
+            &selected,
+            DetectorKind::Representation,
+            "--representation-warning-ratio",
+        )?;
+        representation.warning_ratio = value;
+    }
+    if let Some(value) = threshold_args.representation_critical_ratio {
+        require_selected(
+            &selected,
+            DetectorKind::Representation,
+            "--representation-critical-ratio",
+        )?;
+        representation.critical_ratio = value;
+    }
+    if let Some(value) = threshold_args.missingness_critical_rate_gap {
+        require_selected(
+            &selected,
+            DetectorKind::Missingness,
+            "--missingness-critical-rate-gap",
+        )?;
+        missingness.critical_rate_gap = value;
+    }
+    if let Some(value) = threshold_args.categorical_critical_cramers_v {
+        require_selected(
+            &selected,
+            DetectorKind::CategoricalAssociation,
+            "--categorical-critical-cramers-v",
+        )?;
+        categorical.critical_cramers_v = value;
+    }
+    if let Some(value) = threshold_args.numeric_critical_cliffs_delta {
+        require_selected(
+            &selected,
+            DetectorKind::NumericDistribution,
+            "--numeric-critical-cliffs-delta",
+        )?;
+        numeric.critical_cliffs_delta = value;
+    }
+    if let Some(value) = threshold_args.numeric_critical_epsilon_squared {
+        require_selected(
+            &selected,
+            DetectorKind::NumericDistribution,
+            "--numeric-critical-epsilon-squared",
+        )?;
+        numeric.critical_epsilon_squared = value;
     }
 
-    for detector in detectors {
-        builder = builder.detector(match detector {
-            CliDetector::Representation => {
-                DetectorConfig::Representation(RepresentationConfig::default())
+    let mut configs = Vec::new();
+    for detector in all_detector_kinds() {
+        if !selected.contains(&detector) {
+            continue;
+        }
+        configs.push(match detector {
+            DetectorKind::Representation => DetectorConfig::Representation(representation.clone()),
+            DetectorKind::Missingness => DetectorConfig::Missingness(missingness.clone()),
+            DetectorKind::CategoricalAssociation => {
+                DetectorConfig::CategoricalAssociation(categorical.clone())
             }
-            CliDetector::Missingness => DetectorConfig::Missingness(MissingnessConfig::default()),
-            CliDetector::CategoricalAssociation => {
-                DetectorConfig::CategoricalAssociation(CategoricalAssociationConfig::default())
-            }
-            CliDetector::NumericDistribution => {
-                DetectorConfig::NumericDistribution(NumericDistributionConfig::default())
+            DetectorKind::NumericDistribution => {
+                DetectorConfig::NumericDistribution(numeric.clone())
             }
         });
     }
 
-    builder
+    Ok(configs)
+}
+
+fn selected_detector_kinds(detectors: &[CliDetector]) -> BTreeSet<DetectorKind> {
+    if detectors.is_empty() {
+        return all_detector_kinds().into_iter().collect();
+    }
+
+    detectors.iter().copied().map(Into::into).collect()
+}
+
+fn require_selected(
+    selected: &BTreeSet<DetectorKind>,
+    detector: DetectorKind,
+    flag: &str,
+) -> Result<(), String> {
+    if selected.contains(&detector) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{flag} requires the {} detector",
+            detector_name(detector)
+        ))
+    }
 }
 
 fn load_reference_distributions(
@@ -299,5 +398,121 @@ impl From<CliCorrection> for MultipleTestingCorrection {
             CliCorrection::None => Self::None,
             CliCorrection::BenjaminiHochberg => Self::BenjaminiHochberg,
         }
+    }
+}
+
+impl From<CliDetector> for DetectorKind {
+    fn from(value: CliDetector) -> Self {
+        match value {
+            CliDetector::Representation => Self::Representation,
+            CliDetector::Missingness => Self::Missingness,
+            CliDetector::CategoricalAssociation => Self::CategoricalAssociation,
+            CliDetector::NumericDistribution => Self::NumericDistribution,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Commands, ThresholdArgs, build_detector_configs};
+
+    #[test]
+    fn parses_threshold_flags() {
+        let cli = Cli::try_parse_from([
+            "bias",
+            "audit",
+            "--input",
+            "data.csv",
+            "--sensitive",
+            "gender",
+            "--missingness-critical-rate-gap",
+            "0.4",
+            "--numeric-critical-epsilon-squared",
+            "0.5",
+        ])
+        .expect("cli");
+
+        let Commands::Audit(args) = cli.command;
+        assert_eq!(args.threshold_args.missingness_critical_rate_gap, Some(0.4));
+        assert_eq!(
+            args.threshold_args.numeric_critical_epsilon_squared,
+            Some(0.5)
+        );
+    }
+
+    #[test]
+    fn rejects_threshold_override_for_disabled_detector() {
+        let error = build_detector_configs(
+            &[super::CliDetector::Representation],
+            &ThresholdArgs {
+                missingness_critical_rate_gap: Some(0.4),
+                ..ThresholdArgs::default()
+            },
+        )
+        .expect_err("disabled detector");
+
+        assert!(error.contains("missingness"));
+    }
+
+    #[test]
+    fn applies_cli_threshold_overrides() {
+        let configs = build_detector_configs(
+            &[],
+            &ThresholdArgs {
+                representation_warning_ratio: Some(0.75),
+                numeric_critical_cliffs_delta: Some(0.6),
+                ..ThresholdArgs::default()
+            },
+        )
+        .expect("configs");
+
+        let representation = configs
+            .iter()
+            .find_map(|config| match config {
+                bias_rs::DetectorConfig::Representation(settings) => Some(settings),
+                _ => None,
+            })
+            .expect("representation config");
+        assert_eq!(representation.warning_ratio, 0.75);
+
+        let numeric = configs
+            .iter()
+            .find_map(|config| match config {
+                bias_rs::DetectorConfig::NumericDistribution(settings) => Some(settings),
+                _ => None,
+            })
+            .expect("numeric config");
+        assert_eq!(numeric.critical_cliffs_delta, 0.6);
+    }
+
+    #[test]
+    fn narrows_configs_to_selected_detectors() {
+        let configs = build_detector_configs(
+            &[
+                super::CliDetector::Missingness,
+                super::CliDetector::Representation,
+            ],
+            &ThresholdArgs::default(),
+        )
+        .expect("configs");
+
+        assert_eq!(configs.len(), 2);
+        assert!(
+            configs
+                .iter()
+                .any(|config| matches!(config, bias_rs::DetectorConfig::Representation(_)))
+        );
+        assert!(
+            configs
+                .iter()
+                .any(|config| matches!(config, bias_rs::DetectorConfig::Missingness(_)))
+        );
+        assert!(
+            !configs
+                .iter()
+                .any(|config| matches!(config, bias_rs::DetectorConfig::NumericDistribution(_)))
+        );
     }
 }

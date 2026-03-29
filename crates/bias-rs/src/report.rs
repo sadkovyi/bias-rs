@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::config::{DetectorKind, GroupingMode, MultipleTestingCorrection};
+use crate::config::{DetectorConfig, DetectorKind, GroupingMode, MultipleTestingCorrection};
 
 /// High-level report returned by the audit engine.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -20,6 +20,7 @@ pub struct AuditReportConfig {
     pub grouping_mode: GroupingMode,
     pub alpha: f64,
     pub multiple_testing: MultipleTestingCorrection,
+    pub detectors: Vec<DetectorConfig>,
 }
 
 /// Basic dataset metadata included in the report.

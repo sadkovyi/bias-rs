@@ -38,7 +38,9 @@ pub enum DetectorKind {
 /// Configuration for representation analysis.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RepresentationConfig {
+    /// Emit a warning when a group's observed ratio drops below this value.
     pub warning_ratio: f64,
+    /// Escalate a warning to critical when a group's observed ratio drops below this value.
     pub critical_ratio: f64,
 }
 
@@ -54,13 +56,17 @@ impl Default for RepresentationConfig {
 /// Configuration for missingness analysis.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MissingnessConfig {
+    /// Switch from chi-square to Fisher's exact test when any cell falls below this count.
     pub sparse_table_threshold: usize,
+    /// Escalate a significant finding to critical when the missing-rate gap reaches this value.
+    pub critical_rate_gap: f64,
 }
 
 impl Default for MissingnessConfig {
     fn default() -> Self {
         Self {
             sparse_table_threshold: 5,
+            critical_rate_gap: 0.25,
         }
     }
 }
@@ -68,8 +74,12 @@ impl Default for MissingnessConfig {
 /// Configuration for categorical association analysis.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct CategoricalAssociationConfig {
+    /// Keep at most this many categories after collapsing rare values into `__OTHER__`.
     pub max_categories: usize,
+    /// Keep categories that appear at least this many times before collapsing the rest.
     pub rare_category_threshold: usize,
+    /// Escalate a significant finding to critical when Cramer's V reaches this value.
+    pub critical_cramers_v: f64,
 }
 
 impl Default for CategoricalAssociationConfig {
@@ -77,6 +87,7 @@ impl Default for CategoricalAssociationConfig {
         Self {
             max_categories: 32,
             rare_category_threshold: 5,
+            critical_cramers_v: 0.3,
         }
     }
 }
@@ -84,12 +95,21 @@ impl Default for CategoricalAssociationConfig {
 /// Configuration for numeric distribution analysis.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NumericDistributionConfig {
+    /// Drop missing values before running rank-based tests.
     pub drop_missing: bool,
+    /// Escalate a significant two-group finding to critical when Cliff's delta reaches this value.
+    pub critical_cliffs_delta: f64,
+    /// Escalate a significant multi-group finding to critical when epsilon-squared reaches this value.
+    pub critical_epsilon_squared: f64,
 }
 
 impl Default for NumericDistributionConfig {
     fn default() -> Self {
-        Self { drop_missing: true }
+        Self {
+            drop_missing: true,
+            critical_cliffs_delta: 0.33,
+            critical_epsilon_squared: 0.26,
+        }
     }
 }
 

@@ -18,11 +18,7 @@ use crate::{Severity, SkippedAnalysis};
 
 /// Runs a dataset audit.
 pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditReport, BiasError> {
-    if config.sensitive_columns.is_empty() {
-        return Err(BiasError::InvalidConfig(
-            "at least one sensitive column is required".to_string(),
-        ));
-    }
+    validate_config(config)?;
 
     let missing_columns: Vec<_> = config
         .sensitive_columns
@@ -32,22 +28,6 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
         .collect();
     if let Some(column) = missing_columns.first() {
         return Err(BiasError::MissingColumn(column.clone()));
-    }
-
-    if !(0.0..=1.0).contains(&config.alpha) {
-        return Err(BiasError::InvalidConfig(
-            "alpha must be between 0.0 and 1.0".to_string(),
-        ));
-    }
-
-    if config
-        .reference_distributions
-        .values()
-        .any(|distribution| distribution.groups.values().any(|value| *value <= 0.0))
-    {
-        return Err(BiasError::InvalidConfig(
-            "reference distributions must contain positive proportions".to_string(),
-        ));
     }
 
     let grouping_specs = grouping_specs(config);
@@ -219,12 +199,96 @@ pub fn audit_dataset(dataset: &Dataset, config: &AuditConfig) -> Result<AuditRep
             grouping_mode: config.grouping_mode,
             alpha: config.alpha,
             multiple_testing: config.multiple_testing,
+            detectors: config.detectors.clone(),
         },
         detector_runs,
         group_summaries,
         skipped,
         findings,
     })
+}
+
+fn validate_config(config: &AuditConfig) -> Result<(), BiasError> {
+    if config.sensitive_columns.is_empty() {
+        return Err(BiasError::InvalidConfig(
+            "at least one sensitive column is required".to_string(),
+        ));
+    }
+
+    if !(0.0..=1.0).contains(&config.alpha) {
+        return Err(BiasError::InvalidConfig(
+            "alpha must be between 0.0 and 1.0".to_string(),
+        ));
+    }
+
+    for detector in &config.detectors {
+        match detector {
+            DetectorConfig::Representation(settings) => {
+                validate_ratio("representation warning_ratio", settings.warning_ratio)?;
+                validate_ratio("representation critical_ratio", settings.critical_ratio)?;
+                if settings.critical_ratio > settings.warning_ratio {
+                    return Err(BiasError::InvalidConfig(
+                        "representation critical_ratio must be less than or equal to warning_ratio"
+                            .to_string(),
+                    ));
+                }
+            }
+            DetectorConfig::Missingness(settings) => {
+                validate_unit_interval(
+                    "missingness critical_rate_gap",
+                    settings.critical_rate_gap,
+                )?;
+            }
+            DetectorConfig::CategoricalAssociation(settings) => {
+                validate_unit_interval(
+                    "categorical critical_cramers_v",
+                    settings.critical_cramers_v,
+                )?;
+            }
+            DetectorConfig::NumericDistribution(settings) => {
+                validate_unit_interval(
+                    "numeric critical_cliffs_delta",
+                    settings.critical_cliffs_delta,
+                )?;
+                validate_unit_interval(
+                    "numeric critical_epsilon_squared",
+                    settings.critical_epsilon_squared,
+                )?;
+            }
+        }
+    }
+
+    if config
+        .reference_distributions
+        .values()
+        .any(|distribution| distribution.groups.values().any(|value| *value <= 0.0))
+    {
+        return Err(BiasError::InvalidConfig(
+            "reference distributions must contain positive proportions".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_unit_interval(name: &str, value: f64) -> Result<(), BiasError> {
+    if (0.0..=1.0).contains(&value) {
+        Ok(())
+    } else {
+        Err(BiasError::InvalidConfig(format!(
+            "{name} must be between 0.0 and 1.0"
+        )))
+    }
+}
+
+fn validate_ratio(name: &str, value: f64) -> Result<(), BiasError> {
+    if value > 0.0 && value <= 1.0 {
+        Ok(())
+    } else {
+        Err(BiasError::InvalidConfig(format!(
+            "{name} must be greater than 0.0 and less than or equal to 1.0"
+        )))
+    }
 }
 
 fn finalize_findings(
@@ -376,7 +440,7 @@ fn missingness_findings(
                 sensitive_columns: grouping.columns.clone(),
                 target_column: Some(column.clone()),
                 group: None,
-                severity: if rate_gap >= 0.25 {
+                severity: if rate_gap >= config.critical_rate_gap {
                     Severity::Critical
                 } else {
                     Severity::Warning
@@ -481,13 +545,14 @@ fn categorical_association_findings(
             continue;
         };
 
+        let effect_size = cramers_v(&table, chi_square.statistic);
         findings.push(Finding {
             detector: DetectorKind::CategoricalAssociation,
             grouping: grouping.label.clone(),
             sensitive_columns: grouping.columns.clone(),
             target_column: Some(column.clone()),
             group: None,
-            severity: if cramers_v(&table, chi_square.statistic).unwrap_or(0.0) >= 0.3 {
+            severity: if effect_size.unwrap_or(0.0) >= config.critical_cramers_v {
                 Severity::Critical
             } else {
                 Severity::Warning
@@ -497,7 +562,7 @@ fn categorical_association_findings(
             ),
             p_value: Some(chi_square.p_value),
             corrected_p_value: None,
-            effect_size: cramers_v(&table, chi_square.statistic),
+            effect_size,
             metrics: BTreeMap::from([
                 ("chi_square".to_string(), chi_square.statistic),
                 (
@@ -655,7 +720,7 @@ fn numeric_distribution_findings(
                 sensitive_columns: grouping.columns.clone(),
                 target_column: Some(column.clone()),
                 group: None,
-                severity: if delta.abs() >= 0.33 {
+                severity: if delta.abs() >= config.critical_cliffs_delta {
                     Severity::Critical
                 } else {
                     Severity::Warning
@@ -696,7 +761,7 @@ fn numeric_distribution_findings(
                 sensitive_columns: grouping.columns.clone(),
                 target_column: Some(column.clone()),
                 group: None,
-                severity: if test.epsilon_squared >= 0.26 {
+                severity: if test.epsilon_squared >= config.critical_epsilon_squared {
                     Severity::Critical
                 } else {
                     Severity::Warning
@@ -902,13 +967,48 @@ mod tests {
     use std::collections::BTreeMap;
     use std::io::Write;
 
+    use serde_json::Value;
     use tempfile::NamedTempFile;
 
-    use crate::DetectorKind;
-    use crate::config::{AuditConfig, GroupingMode, ReferenceDistribution};
+    use crate::config::{
+        AuditConfig, CategoricalAssociationConfig, DetectorConfig, GroupingMode, MissingnessConfig,
+        NumericDistributionConfig, ReferenceDistribution, RepresentationConfig,
+    };
     use crate::io::csv::{CsvReadOptions, read_csv};
+    use crate::{DetectorKind, Severity};
 
     use super::audit_dataset;
+
+    fn dataset_from_csv(contents: &str) -> crate::Dataset {
+        let mut file = NamedTempFile::new().expect("temp file");
+        write!(file, "{contents}").expect("write csv");
+        read_csv(file.path(), CsvReadOptions::default()).expect("dataset")
+    }
+
+    fn single_detector_config(
+        sensitive_column: &str,
+        detector: DetectorConfig,
+        min_group_size: usize,
+    ) -> AuditConfig {
+        AuditConfig::builder()
+            .sensitive_column(sensitive_column)
+            .disable_detector(DetectorKind::Representation)
+            .disable_detector(DetectorKind::Missingness)
+            .disable_detector(DetectorKind::CategoricalAssociation)
+            .disable_detector(DetectorKind::NumericDistribution)
+            .detector(detector)
+            .min_group_size(min_group_size)
+            .build()
+    }
+
+    fn detector_severity(report: &crate::AuditReport, detector: DetectorKind) -> Severity {
+        report
+            .findings
+            .iter()
+            .find(|finding| finding.detector == detector)
+            .map(|finding| finding.severity)
+            .expect("detector finding")
+    }
 
     #[test]
     fn representation_audit_reports_underrepresented_groups() {
@@ -1083,5 +1183,298 @@ mod tests {
                 .filter(|finding| finding.p_value.is_some())
                 .all(|finding| finding.corrected_p_value.is_some())
         );
+    }
+
+    #[test]
+    fn rejects_out_of_range_thresholds() {
+        let dataset = dataset_from_csv("gender\nwoman\nman\n");
+        let config = single_detector_config(
+            "gender",
+            DetectorConfig::CategoricalAssociation(CategoricalAssociationConfig {
+                critical_cramers_v: 1.2,
+                ..CategoricalAssociationConfig::default()
+            }),
+            1,
+        );
+
+        let error = audit_dataset(&dataset, &config).expect_err("invalid threshold");
+        assert!(error.to_string().contains("critical_cramers_v"));
+    }
+
+    #[test]
+    fn rejects_inverted_representation_ratios() {
+        let dataset = dataset_from_csv("gender\nwoman\nman\n");
+        let config = AuditConfig::builder()
+            .sensitive_column("gender")
+            .detector(DetectorConfig::Representation(RepresentationConfig {
+                warning_ratio: 0.4,
+                critical_ratio: 0.6,
+            }))
+            .build();
+
+        let error = audit_dataset(&dataset, &config).expect_err("invalid ratios");
+        assert!(error.to_string().contains("critical_ratio"));
+    }
+
+    #[test]
+    fn missingness_threshold_changes_severity() {
+        let dataset = dataset_from_csv(
+            "gender,score\n\
+             woman,\n\
+             woman,\n\
+             woman,\n\
+             woman,\n\
+             woman,\n\
+             woman,\n\
+             woman,\n\
+             woman,1.0\n\
+             man,2.0\n\
+             man,2.0\n\
+             man,3.0\n\
+             man,3.0\n\
+             man,4.0\n\
+             man,4.0\n\
+             man,5.0\n\
+             man,5.0\n",
+        );
+        let warning_config = single_detector_config(
+            "gender",
+            DetectorConfig::Missingness(MissingnessConfig {
+                critical_rate_gap: 0.9,
+                ..MissingnessConfig::default()
+            }),
+            2,
+        );
+        let critical_config = single_detector_config(
+            "gender",
+            DetectorConfig::Missingness(MissingnessConfig {
+                critical_rate_gap: 0.8,
+                ..MissingnessConfig::default()
+            }),
+            2,
+        );
+
+        let warning_report = audit_dataset(&dataset, &warning_config).expect("warning report");
+        let critical_report = audit_dataset(&dataset, &critical_config).expect("critical report");
+
+        assert_eq!(
+            detector_severity(&warning_report, DetectorKind::Missingness),
+            Severity::Warning
+        );
+        assert_eq!(
+            detector_severity(&critical_report, DetectorKind::Missingness),
+            Severity::Critical
+        );
+    }
+
+    #[test]
+    fn categorical_threshold_changes_severity() {
+        let dataset = dataset_from_csv(
+            "gender,region\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,north\n\
+             woman,south\n\
+             woman,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,south\n\
+             man,north\n\
+             man,north\n",
+        );
+        let warning_config = single_detector_config(
+            "gender",
+            DetectorConfig::CategoricalAssociation(CategoricalAssociationConfig {
+                critical_cramers_v: 0.7,
+                ..CategoricalAssociationConfig::default()
+            }),
+            2,
+        );
+        let critical_config = single_detector_config(
+            "gender",
+            DetectorConfig::CategoricalAssociation(CategoricalAssociationConfig {
+                critical_cramers_v: 0.6,
+                ..CategoricalAssociationConfig::default()
+            }),
+            2,
+        );
+
+        let warning_report = audit_dataset(&dataset, &warning_config).expect("warning report");
+        let critical_report = audit_dataset(&dataset, &critical_config).expect("critical report");
+
+        assert_eq!(
+            detector_severity(&warning_report, DetectorKind::CategoricalAssociation),
+            Severity::Warning
+        );
+        assert_eq!(
+            detector_severity(&critical_report, DetectorKind::CategoricalAssociation),
+            Severity::Critical
+        );
+    }
+
+    #[test]
+    fn numeric_cliffs_delta_threshold_changes_severity() {
+        let dataset = dataset_from_csv(
+            "gender,score\n\
+             woman,1\n\
+             woman,2\n\
+             woman,3\n\
+             woman,4\n\
+             woman,5\n\
+             woman,6\n\
+             woman,7\n\
+             woman,8\n\
+             woman,9\n\
+             woman,10\n\
+             woman,11\n\
+             woman,12\n\
+             woman,13\n\
+             woman,14\n\
+             woman,15\n\
+             woman,16\n\
+             woman,17\n\
+             woman,18\n\
+             woman,19\n\
+             woman,20\n\
+             man,10\n\
+             man,11\n\
+             man,12\n\
+             man,13\n\
+             man,14\n\
+             man,15\n\
+             man,16\n\
+             man,17\n\
+             man,18\n\
+             man,19\n\
+             man,20\n\
+             man,21\n\
+             man,22\n\
+             man,23\n\
+             man,24\n\
+             man,25\n\
+             man,26\n\
+             man,27\n\
+             man,28\n\
+             man,29\n",
+        );
+        let warning_config = single_detector_config(
+            "gender",
+            DetectorConfig::NumericDistribution(NumericDistributionConfig {
+                critical_cliffs_delta: 0.75,
+                ..NumericDistributionConfig::default()
+            }),
+            2,
+        );
+        let critical_config = single_detector_config(
+            "gender",
+            DetectorConfig::NumericDistribution(NumericDistributionConfig {
+                critical_cliffs_delta: 0.65,
+                ..NumericDistributionConfig::default()
+            }),
+            2,
+        );
+
+        let warning_report = audit_dataset(&dataset, &warning_config).expect("warning report");
+        let critical_report = audit_dataset(&dataset, &critical_config).expect("critical report");
+
+        assert_eq!(
+            detector_severity(&warning_report, DetectorKind::NumericDistribution),
+            Severity::Warning
+        );
+        assert_eq!(
+            detector_severity(&critical_report, DetectorKind::NumericDistribution),
+            Severity::Critical
+        );
+    }
+
+    #[test]
+    fn numeric_epsilon_squared_threshold_changes_severity() {
+        let dataset = dataset_from_csv(
+            "group,score\n\
+             a,1\n\
+             a,2\n\
+             a,3\n\
+             b,5\n\
+             b,6\n\
+             b,7\n\
+             c,8\n\
+             c,9\n\
+             c,10\n",
+        );
+        let warning_config = single_detector_config(
+            "group",
+            DetectorConfig::NumericDistribution(NumericDistributionConfig {
+                critical_epsilon_squared: 0.9,
+                ..NumericDistributionConfig::default()
+            }),
+            2,
+        );
+        let critical_config = single_detector_config(
+            "group",
+            DetectorConfig::NumericDistribution(NumericDistributionConfig {
+                critical_epsilon_squared: 0.4,
+                ..NumericDistributionConfig::default()
+            }),
+            2,
+        );
+
+        let warning_report = audit_dataset(&dataset, &warning_config).expect("warning report");
+        let critical_report = audit_dataset(&dataset, &critical_config).expect("critical report");
+
+        assert_eq!(
+            detector_severity(&warning_report, DetectorKind::NumericDistribution),
+            Severity::Warning
+        );
+        assert_eq!(
+            detector_severity(&critical_report, DetectorKind::NumericDistribution),
+            Severity::Critical
+        );
+    }
+
+    #[test]
+    fn report_config_serializes_effective_detector_thresholds() {
+        let dataset = dataset_from_csv(
+            "gender,score\n\
+             woman,\n\
+             woman,\n\
+             woman,1.0\n\
+             man,2.0\n\
+             man,2.0\n\
+             man,3.0\n",
+        );
+        let config = single_detector_config(
+            "gender",
+            DetectorConfig::Missingness(MissingnessConfig {
+                critical_rate_gap: 0.4,
+                ..MissingnessConfig::default()
+            }),
+            2,
+        );
+
+        let report = audit_dataset(&dataset, &config).expect("report");
+        let json = serde_json::to_value(&report).expect("json");
+        let detectors = json["config"]["detectors"]
+            .as_array()
+            .expect("detector configs");
+        let missingness = detectors
+            .iter()
+            .find(|detector| detector["kind"] == Value::String("missingness".to_string()))
+            .expect("missingness detector");
+
+        assert_eq!(missingness["critical_rate_gap"], Value::from(0.4));
     }
 }

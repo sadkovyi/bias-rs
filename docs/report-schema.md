@@ -7,11 +7,18 @@ JSON or as plain text.
 
 - `dataset`: row count, column count, batch count, and per-column metadata.
 - `config`: the effective sensitive columns, grouping mode, alpha, and
-  multiple-testing strategy.
+  multiple-testing strategy, plus the detector settings used for the run.
 - `detector_runs`: one entry per detector and grouping combination.
 - `group_summaries`: row counts and proportions for each observed group.
 - `skipped`: analyses that were not run, along with the reason.
 - `findings`: the final set of findings after p-value correction.
+
+## Config fields
+
+The `config.detectors` array stores the effective detector settings. That
+includes severity thresholds such as `critical_rate_gap`,
+`critical_cramers_v`, `critical_cliffs_delta`, and
+`critical_epsilon_squared`.
 
 ## Finding fields
 

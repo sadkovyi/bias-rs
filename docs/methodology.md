@@ -28,6 +28,29 @@ distribution are filtered through the configured significance threshold and
 multiple-testing correction. By default, the library uses
 Benjamini-Hochberg correction.
 
+Severity is a separate step. Once a finding survives the p-value filter,
+`bias-rs` assigns `warning` or `critical` with detector-specific thresholds.
+
+## Severity thresholds
+
+- Representation uses ratios, not p-values. By default, a group is a warning
+  below `0.8` of the largest or expected group and critical below `0.5`.
+  These are project defaults meant to surface large representation gaps.
+- Missingness uses the largest minus smallest missing-rate gap. By default, a
+  significant result becomes critical at `0.25`. This is a project heuristic.
+- Categorical association uses Cramer's V. By default, a significant result
+  becomes critical at `0.3`. This is a common rule of thumb for at least a
+  moderate association.
+- Numeric distribution with two groups uses Cliff's delta. By default, a
+  significant result becomes critical at `0.33`. This matches a common
+  medium-effect cutoff.
+- Numeric distribution with three or more groups uses epsilon-squared. By
+  default, a significant result becomes critical at `0.26`. This is a project
+  default meant to highlight strong rank separation across groups.
+
+All of these thresholds are configurable through detector settings in the
+library API and through matching CLI flags.
+
 ## Caveats
 
 - Small groups are skipped for statistical testing once they fall under the
