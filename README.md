@@ -61,7 +61,7 @@ Default thresholds:
 Override them from the CLI when you need a different review bar:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
@@ -85,13 +85,13 @@ CSV or Parquet metadata table rather than the raw assets themselves.
 Build the CLI:
 
 ```bash
-cargo build -p bias-cli
+cargo build -p bias-rs-cli
 ```
 
 Run an audit against a CSV file:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
@@ -104,7 +104,7 @@ cargo run -p bias-cli -- audit \
 Ask for JSON instead:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
@@ -115,7 +115,7 @@ cargo run -p bias-cli -- audit \
 Read Parquet instead of CSV:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.parquet \
   --format parquet \
   --sensitive gender \
@@ -126,7 +126,7 @@ cargo run -p bias-cli -- audit \
 Limit the audit to a subset of columns:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \
@@ -162,7 +162,7 @@ Example file:
 Use it from the CLI:
 
 ```bash
-cargo run -p bias-cli -- audit \
+cargo run -p bias-rs-cli -- audit \
   --input data/training_metadata.csv \
   --format csv \
   --sensitive gender \

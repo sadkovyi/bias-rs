@@ -1,7 +1,7 @@
 [workspace]
 members = [
     "crates/bias-rs",
-    "crates/bias-cli",
+    "crates/bias-rs-cli",
 ]
 resolver = "2"
 
