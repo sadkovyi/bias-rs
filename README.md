@@ -82,6 +82,8 @@ CSV or Parquet metadata table rather than the raw assets themselves.
 
 ## CLI quick start
 
+Requires Rust 1.89 or newer.
+
 Build the CLI:
 
 ```bash

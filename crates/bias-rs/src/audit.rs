@@ -793,7 +793,7 @@ fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|left, right| left.total_cmp(right));
     let middle = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         (sorted[middle - 1] + sorted[middle]) / 2.0
     } else {
         sorted[middle]
@@ -864,32 +864,32 @@ fn representation_findings(
             .keys()
             .filter_map(|group| distribution.groups.get(group).copied())
             .collect::<Vec<_>>();
-        if expected.len() == observed.len() {
-            if let Some(test) = goodness_of_fit(&observed, &expected) {
-                findings.push(Finding {
-                    detector: DetectorKind::Representation,
-                    grouping: grouping.label.clone(),
-                    sensitive_columns: grouping.columns.clone(),
-                    target_column: None,
-                    group: None,
-                    severity: if imbalance_ratio < config.critical_ratio {
-                        Severity::Critical
-                    } else {
-                        Severity::Warning
-                    },
-                    message: "group proportions differ from the configured reference distribution"
-                        .to_string(),
-                    p_value: Some(test.p_value),
-                    corrected_p_value: None,
-                    effect_size: None,
-                    metrics: BTreeMap::from([
-                        ("chi_square".to_string(), test.statistic),
-                        ("min_expected_count".to_string(), test.min_expected_count),
-                        ("imbalance_ratio".to_string(), imbalance_ratio),
-                        ("group_count".to_string(), counts.len() as f64),
-                    ]),
-                });
-            }
+        if expected.len() == observed.len()
+            && let Some(test) = goodness_of_fit(&observed, &expected)
+        {
+            findings.push(Finding {
+                detector: DetectorKind::Representation,
+                grouping: grouping.label.clone(),
+                sensitive_columns: grouping.columns.clone(),
+                target_column: None,
+                group: None,
+                severity: if imbalance_ratio < config.critical_ratio {
+                    Severity::Critical
+                } else {
+                    Severity::Warning
+                },
+                message: "group proportions differ from the configured reference distribution"
+                    .to_string(),
+                p_value: Some(test.p_value),
+                corrected_p_value: None,
+                effect_size: None,
+                metrics: BTreeMap::from([
+                    ("chi_square".to_string(), test.statistic),
+                    ("min_expected_count".to_string(), test.min_expected_count),
+                    ("imbalance_ratio".to_string(), imbalance_ratio),
+                    ("group_count".to_string(), counts.len() as f64),
+                ]),
+            });
         }
 
         for (group, count) in counts {
